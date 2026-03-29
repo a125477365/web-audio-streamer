@@ -2,6 +2,29 @@
 
 基于 Web 的音乐播放器，支持将音频流发送到 ESP32 设备。
 
+## 一键安装
+
+### OpenClaw 自动安装
+
+直接告诉 OpenClaw：
+
+```
+请安装 web-audio-streamer
+```
+
+### 命令行安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/a125477365/web-audio-streamer/main/install.sh | bash
+```
+
+安装脚本会自动：
+- ✅ 检查并安装 Node.js
+- ✅ 检查并安装 FFmpeg
+- ✅ 克隆项目
+- ✅ 安装所有依赖
+- ✅ 启动服务
+
 ## 功能特性
 
 ### 1. 本地音乐播放
