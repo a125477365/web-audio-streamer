@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Audio Streamer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <style>
+    [v-cloak] { display: none; }
+    .playing { animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+  <div id="app" v-cloak>
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 px-6 py-4">
+      <div class="max-w-7xl mx-auto flex items-center justify-between">
+        <h1 class="text-2xl font-bold text-blue-400">
+          <span class="mr-2">🎵</span> Web Audio Streamer
+        </h1>
+        <div class="flex items-center gap-4">
+          <span class="text-sm text-gray-400">
+            ESP32: {{ esp32.host }}:{{ esp32.port }}
+          </span>
+          <span :class="status.isPlaying ? 'text-green-400' : 'text-gray-500'" class="text-sm">
+            {{ status.isPlaying ? '● 播放中' : '○ 待机' }}
+          </span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto p-6">
+      <!-- Tab Navigation -->
+      <div class="flex gap-2 mb-6">
+        <button 
+          v-for="tab in tabs" 
+          :key="tab.id"
+          @click="activeTab = tab.id"
+          :class="activeTab === tab.id ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'"
+          class="px-4 py-2 rounded-lg transition-colors"
+        >
+          {{ tab.icon }} {{ tab.name }}
+        </button>
+      </div>
+
+      <!-- Local Music Tab -->
+      <div v-if="activeTab === 'local'" class="space-y-4">
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="flex gap-2 mb-4">
+            <input 
+              v-model="localPath"
+              type="text" 
+              placeholder="输入音乐文件夹路径..."
+              class="flex-1 bg-gray-700 rounded px-3 py-2"
+            >
+            <button 
+              @click="scanLocal"
+              :disabled="scanning"
+              class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded disabled:opacity-50"
+            >
+              {{ scanning ? '扫描中...' : '扫描' }}
+            </button>
+          </div>
+
+          <!-- Music List -->
+          <div v-if="localFiles.length > 0" class="space-y-2 max-h-96 overflow-y-auto">
+            <div 
+              v-for="(file, i) in localFiles" 
+              :key="i"
+              class="bg-gray-700 rounded p-3 flex items-center justify-between hover:bg-gray-600 cursor-pointer"
+              @click="playLocal(file.path)"
+            >
+              <div class="flex-1">
+                <div class="font-medium">{{ file.title }}</div>
+                <div class="text-sm text-gray-400">{{ file.artist }} - {{ file.album }}</div>
+              </div>
+              <div class="text-sm text-gray-400">
+                {{ formatDuration(file.duration) }}
+              </div>
+            </div>
+          </div>
+          <div v-else class="text-gray-400 text-center py-8">
+            请扫描音乐文件夹
+          </div>
+        </div>
+      </div>
+
+      <!-- Online Music Tab -->
+      <div v-if="activeTab === 'online'" class="space-y-4">
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="flex gap-2 mb-4">
+            <input 
+              v-model="searchQuery"
+              type="text" 
+              placeholder="搜索歌曲、歌手..."
+              class="flex-1 bg-gray-700 rounded px-3 py-2"
+              @keyup.enter="searchOnline"
+            >
+            <button 
+              @click="searchOnline"
+              :disabled="searching"
+              class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded disabled:opacity-50"
+            >
+              {{ searching ? '搜索中...' : '搜索' }}
+            </button>
+          </div>
+
+          <!-- Search Results -->
+          <div v-if="searchResults.length > 0" class="space-y-2 max-h-96 overflow-y-auto">
+            <div 
+              v-for="(song, i) in searchResults" 
+              :key="i"
+              class="bg-gray-700 rounded p-3 flex items-center justify-between hover:bg-gray-600 cursor-pointer"
+              @click="playOnline(song)"
+            >
+              <div class="flex-1">
+                <div class="font-medium">{{ song.title }}</div>
+                <div class="text-sm text-gray-400">{{ song.artist }} - {{ song.album }}</div>
+              </div>
+              <div>
+                <img v-if="song.cover" :src="song.cover" class="w-12 h-12 rounded object-cover">
+              </div>
+            </div>
+          </div>
+          <div v-else class="text-gray-400 text-center py-8">
+            输入关键词搜索歌曲
+          </div>
+        </div>
+      </div>
+
+      <!-- Radio Tab -->
+      <div v-if="activeTab === 'radio'" class="space-y-4">
+        <div class="bg-gray-800 rounded-lg p-4">
+          <h3 class="text-lg font-medium mb-4">预设电台</h3>
+          <div class="space-y-2">
+            <div 
+              v-for="(radio, i) in radios" 
+              :key="i"
+              class="bg-gray-700 rounded p-3 flex items-center justify-between hover:bg-gray-600 cursor-pointer"
+              @click="playRadio(radio)"
+            >
+              <div>
+                <div class="font-medium">{{ radio.name }}</div>
+                <div class="text-sm text-gray-400">{{ radio.url }}</div>
+              </div>
+              <span class="text-blue-400">▶</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom Radio -->
+        <div class="bg-gray-800 rounded-lg p-4">
+          <h3 class="text-lg font-medium mb-4">自定义电台</h3>
+          <div class="flex gap-2">
+            <input 
+              v-model="customRadioUrl"
+              type="text" 
+              placeholder="输入电台流 URL..."
+              class="flex-1 bg-gray-700 rounded px-3 py-2"
+            >
+            <button 
+              @click="playCustomRadio"
+              class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
+            >
+              播放
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Tab -->
+      <div v-if="activeTab === 'settings'" class="space-y-4">
+        <div class="bg-gray-800 rounded-lg p-4">
+          <h3 class="text-lg font-medium mb-4">ESP32 配置</h3>
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm text-gray-400 mb-1">IP 地址</label>
+              <input 
+                v-model="esp32.host"
+                type="text" 
+                class="w-full bg-gray-700 rounded px-3 py-2"
+              >
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-1">端口</label>
+              <input 
+                v-model.number="esp32.port"
+                type="number" 
+                class="w-full bg-gray-700 rounded px-3 py-2"
+              >
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-gray-800 rounded-lg p-4">
+          <h3 class="text-lg font-medium mb-4">音频配置</h3>
+          <div class="grid grid-cols-3 gap-4">
+            <div>
+              <label class="block text-sm text-gray-400 mb-1">采样率</label>
+              <select v-model.number="audio.sampleRate" class="w-full bg-gray-700 rounded px-3 py-2">
+                <option :value="44100">44.1 kHz</option>
+                <option :value="48000">48 kHz</option>
+                <option :value="96000">96 kHz</option>
+                <option :value="192000">192 kHz</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-1">位深</label>
+              <select v-model.number="audio.bitsPerSample" class="w-full bg-gray-700 rounded px-3 py-2">
+                <option :value="16">16 bit</option>
+                <option :value="24">24 bit</option>
+                <option :value="32">32 bit</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-1">声道</label>
+              <select v-model.number="audio.channels" class="w-full bg-gray-700 rounded px-3 py-2">
+                <option :value="1">单声道</option>
+                <option :value="2">立体声</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Player Bar -->
+    <div class="fixed bottom-0 left-0 right-0 bg-gray-800 border-t border-gray-700 px-6 py-4">
+      <div class="max-w-7xl mx-auto flex items-center gap-4">
+        <button 
+          @click="stop"
+          class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded"
+        >
+          ⏹ 停止
+        </button>
+        
+        <div class="flex-1">
+          <div v-if="currentTrack" class="text-center">
+            <span class="font-medium">{{ currentTrack.title }}</span>
+            <span class="text-gray-400 ml-2">{{ currentTrack.artist }}</span>
+          </div>
+          <div v-else class="text-center text-gray-400">
+            未在播放
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 w-48">
+          <span class="text-gray-400">🔊</span>
+          <input 
+            v-model.number="volume"
+            type="range" 
+            min="0" 
+            max="100"
+            class="flex-1"
+            @change="setVolume"
+          >
+          <span class="text-sm w-12 text-right">{{ volume }}%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, onMounted, onUnmounted } = Vue;
+
+    createApp({
+      setup() {
+        const activeTab = ref('local');
+        const tabs = [
+          { id: 'local', name: '本地音乐', icon: '📁' },
+          { id: 'online', name: '在线搜索', icon: '🌐' },
+          { id: 'radio', name: '网络电台', icon: '📻' },
+          { id: 'settings', name: '设置', icon: '⚙️' },
+        ];
+
+        // Local music
+        const localPath = ref('');
+        const localFiles = ref([]);
+        const scanning = ref(false);
+
+        // Online music
+        const searchQuery = ref('');
+        const searchResults = ref([]);
+        const searching = ref(false);
+
+        // Radio
+        const radios = ref([
+          { name: 'BBC World Service', url: 'https://stream.live.vc.bbcmedia.co.uk/bbc_world_service' },
+          { name: 'Jazz FM', url: 'https://edge-bauerall-01-gosshbp.dominantstream.com/jazz.mp3' },
+          { name: 'Classic FM', url: 'https://media-ice.musicradio.com/ClassicFMMP3' },
+        ]);
+        const customRadioUrl = ref('');
+
+        // Player state
+        const status = ref({ isPlaying: false });
+        const currentTrack = ref(null);
+        const volume = ref(80);
+        const esp32 = ref({ host: '192.168.6.89', port: 8000 });
+        const audio = ref({ sampleRate: 192000, bitsPerSample: 32, channels: 2 });
+
+        let ws = null;
+
+        // API calls
+        const api = {
+          async get(path) {
+            const res = await fetch(`/api${path}`);
+            return res.json();
+          },
+          async post(path, body) {
+            const res = await fetch(`/api${path}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            return res.json();
+          },
+        };
+
+        // Local music functions
+        async function scanLocal() {
+          if (!localPath.value) return;
+          scanning.value = true;
+          try {
+            const res = await api.get(`/local/scan?path=${encodeURIComponent(localPath.value)}`);
+            if (res.success) {
+              localFiles.value = res.files;
+            }
+          } finally {
+            scanning.value = false;
+          }
+        }
+
+        async function playLocal(path) {
+          const res = await api.get(`/local/play?file=${encodeURIComponent(path)}`);
+          if (res.success) {
+            currentTrack.value = localFiles.value.find(f => f.path === path);
+          }
+        }
+
+        // Online music functions
+        async function searchOnline() {
+          if (!searchQuery.value) return;
+          searching.value = true;
+          try {
+            const res = await api.get(`/online/search?q=${encodeURIComponent(searchQuery.value)}`);
+            if (res.success) {
+              searchResults.value = res.results;
+            }
+          } finally {
+            searching.value = false;
+          }
+        }
+
+        async function playOnline(song) {
+          const res = await api.get(`/online/play?id=${song.id}`);
+          if (res.success) {
+            currentTrack.value = song;
+          }
+        }
+
+        // Radio functions
+        async function playRadio(radio) {
+          const res = await api.get(`/radio/play?url=${encodeURIComponent(radio.url)}`);
+          if (res.success) {
+            currentTrack.value = { title: radio.name, artist: '网络电台' };
+          }
+        }
+
+        async function playCustomRadio() {
+          if (!customRadioUrl.value) return;
+          const res = await api.get(`/radio/play?url=${encodeURIComponent(customRadioUrl.value)}`);
+          if (res.success) {
+            currentTrack.value = { title: '自定义电台', artist: customRadioUrl.value };
+          }
+        }
+
+        // Player controls
+        async function stop() {
+          await api.post('/control/stop');
+          currentTrack.value = null;
+        }
+
+        async function setVolume() {
+          await api.post('/control/volume', { volume: volume.value });
+        }
+
+        // Utility
+        function formatDuration(seconds) {
+          if (!seconds) return '--:--';
+          const mins = Math.floor(seconds / 60);
+          const secs = Math.floor(seconds % 60);
+          return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // WebSocket for status updates
+        function connectWebSocket() {
+          const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          ws = new WebSocket(`${protocol}//${location.host}`);
+          
+          ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'status') {
+              status.value = data.data;
+            }
+          };
+
+          ws.onclose = () => {
+            // Reconnect after 3 seconds
+            setTimeout(connectWebSocket, 3000);
+          };
+        }
+
+        onMounted(() => {
+          connectWebSocket();
+        });
+
+        onUnmounted(() => {
+          if (ws) ws.close();
+        });
+
+        return {
+          activeTab, tabs,
+          localPath, localFiles, scanning, scanLocal, playLocal,
+          searchQuery, searchResults, searching, searchOnline, playOnline,
+          radios, customRadioUrl, playRadio, playCustomRadio,
+          status, currentTrack, volume, esp32, audio,
+          stop, setVolume, formatDuration,
+        };
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>

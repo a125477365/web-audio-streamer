@@ -1,0 +1,40 @@
+{
+  "server": {
+    "port": 3000,
+    "host": "0.0.0.0"
+  },
+  "esp32": {
+    "host": "192.168.6.89",
+    "port": 8000
+  },
+  "audio": {
+    "sampleRate": 192000,
+    "bitsPerSample": 32,
+    "channels": 2,
+    "bufferMs": 500
+  },
+  "music": {
+    "localPaths": [],
+    "supportedFormats": [".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".ape"]
+  },
+  "online": {
+    "provider": "netease",
+    "neteaseApi": "https://api.injahow.cn/meting/"
+  },
+  "radio": {
+    "presets": [
+      {
+        "name": "BBC World Service",
+        "url": "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
+      },
+      {
+        "name": "Jazz FM",
+        "url": "https://edge-bauerall-01-gosshbp.dominantstream.com/jazz.mp3"
+      },
+      {
+        "name": "Classic FM",
+        "url": "https://media-ice.musicradio.com/ClassicFMMP3"
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "web-audio-streamer",
+  "version": "1.0.0",
+  "description": "Web-based audio player with ESP32 UDP streaming support",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node server/index.js",
+    "start": "node server/index.js",
+    "build:ui": "cd web-ui && npm run build"
+  },
+  "keywords": ["audio", "streaming", "esp32", "udp", "music-player"],
+  "author": "谭坚",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "fluent-ffmpeg": "^2.1.2",
+    "music-metadata": "^8.1.4",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0"
+  }
+}
