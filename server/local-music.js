@@ -4,100 +4,126 @@
 
 import fs from 'fs';
 import path from 'path';
-import { parseFile } from 'music-metadata';
 
 export class LocalMusicScanner {
   constructor(config) {
     this.config = config;
-    this.supportedFormats = config.music.supportedFormats || [
-      '.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.ape'
-    ];
     this.files = [];
+    this.supportedFormats = config.music?.supportedFormats || 
+      ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.ape'];
   }
 
   /**
-   * 扫描音乐文件夹
+   * 扫描目录
    */
-  async scan(scanPath) {
-    const paths = scanPath ? [scanPath] : this.config.music.localPaths;
+  async scan(scanPath, options = {}) {
+    const { sortBy = 'name', page = 1, pageSize = 50 } = options;
+    
     this.files = [];
-
-    for (const basePath of paths) {
-      if (!fs.existsSync(basePath)) {
-        console.warn(`[LocalScanner] Path not found: ${basePath}`);
-        continue;
-      }
-
-      await this._scanDirectory(basePath);
+    
+    if (!fs.existsSync(scanPath)) {
+      return { files: [], count: 0, page, pageSize };
     }
-
-    console.log(`[LocalScanner] Found ${this.files.length} music files`);
-    return this.files;
+    
+    this._scanDir(scanPath);
+    
+    // 排序
+    this.files.sort((a, b) => {
+      switch (sortBy) {
+        case 'date':
+          return (b.modifiedAt || 0) - (a.modifiedAt || 0);
+        case 'size':
+          return (b.size || 0) - (a.size || 0);
+        case 'name':
+        default:
+          return a.name.localeCompare(b.name, 'zh-CN');
+      }
+    });
+    
+    // 分页
+    const count = this.files.length;
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    const pagedFiles = this.files.slice(start, end);
+    
+    return {
+      files: pagedFiles,
+      count,
+      page,
+      pageSize,
+      totalPages: Math.ceil(count / pageSize)
+    };
   }
 
   /**
    * 递归扫描目录
    */
-  async _scanDirectory(dirPath) {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry.name);
-
-      if (entry.isDirectory()) {
-        await this._scanDirectory(fullPath);
-      } else if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (this.supportedFormats.includes(ext)) {
-          const fileInfo = await this._getFileInfo(fullPath);
-          this.files.push(fileInfo);
+  _scanDir(dir) {
+    try {
+      const items = fs.readdirSync(dir, { withFileTypes: true });
+      
+      items.forEach(item => {
+        const fullPath = path.join(dir, item.name);
+        
+        if (item.isDirectory()) {
+          this._scanDir(fullPath);
+        } else if (item.isFile()) {
+          const ext = path.extname(item.name).toLowerCase();
+          if (this.supportedFormats.includes(ext)) {
+            try {
+              const stat = fs.statSync(fullPath);
+              const parsed = this._parseFileName(item.name);
+              
+              this.files.push({
+                path: fullPath,
+                name: item.name,
+                title: parsed.title,
+                artist: parsed.artist,
+                size: stat.size,
+                sizeText: this._formatSize(stat.size),
+                modifiedAt: stat.mtimeMs,
+                modifiedAtText: stat.mtime.toISOString(),
+                extension: ext.replace('.', '')
+              });
+            } catch (e) {
+              // 忽略无法读取的文件
+            }
+          }
         }
-      }
+      });
+    } catch (e) {
+      console.error('[LocalMusic] Scan error:', e.message);
     }
   }
 
   /**
-   * 获取文件信息和元数据
+   * 解析文件名
    */
-  async _getFileInfo(filePath) {
-    const stats = fs.statSync(filePath);
-    const ext = path.extname(filePath).toLowerCase();
-
-    // 基本文件信息
-    const info = {
-      path: filePath,
-      filename: path.basename(filePath),
-      extension: ext,
-      size: stats.size,
-      modified: stats.mtime,
-      // 默认元数据
-      title: path.basename(filePath, ext),
-      artist: 'Unknown Artist',
-      album: 'Unknown Album',
-      duration: 0,
-    };
-
-    // 尝试提取元数据
-    try {
-      const metadata = await parseFile(filePath);
-      
-      if (metadata.common) {
-        info.title = metadata.common.title || info.title;
-        info.artist = metadata.common.artist || info.artist;
-        info.album = metadata.common.album || info.album;
-        info.duration = metadata.format.duration || 0;
-      }
-
-      // 专辑封面
-      if (metadata.common.picture && metadata.common.picture.length > 0) {
-        info.cover = `data:${metadata.common.picture[0].format};base64,${metadata.common.picture[0].data.toString('base64')}`;
-      }
-    } catch (error) {
-      // 元数据提取失败，使用默认值
-      console.debug(`[LocalScanner] Failed to parse metadata: ${filePath}`, error.message);
+  _parseFileName(filename) {
+    const name = filename.replace(/\.[^.]+$/, '');
+    const match = name.match(/^(.+?)\s*-\s*(.+)$/);
+    
+    if (match) {
+      return {
+        artist: match[1].trim(),
+        title: match[2].trim()
+      };
     }
+    
+    return {
+      artist: '未知',
+      title: name
+    };
+  }
 
-    return info;
+  /**
+   * 格式化文件大小
+   */
+  _formatSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
 
   /**
@@ -105,26 +131,5 @@ export class LocalMusicScanner {
    */
   getFiles() {
     return this.files;
-  }
-
-  /**
-   * 搜索文件
-   */
-  search(query) {
-    const q = query.toLowerCase();
-    return this.files.filter(f => 
-      f.title.toLowerCase().includes(q) ||
-      f.artist.toLowerCase().includes(q) ||
-      f.album.toLowerCase().includes(q)
-    );
-  }
-
-  /**
-   * 添加扫描路径
-   */
-  addPath(newPath) {
-    if (!this.config.music.localPaths.includes(newPath)) {
-      this.config.music.localPaths.push(newPath);
-    }
   }
 }

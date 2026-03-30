@@ -15,7 +15,7 @@ export class AudioStreamer {
     this.currentSource = null;
     this.volume = 100;
     this.statusCallbacks = [];
-    
+
     // 创建 UDP socket
     this.udpSocket = dgram.createSocket('udp4');
   }
@@ -50,13 +50,20 @@ export class AudioStreamer {
     const { host, port } = this.config.esp32;
 
     // FFmpeg 参数
-    // 输入 → 解码 → 重采样 → 格式转换 → PCM 输出
+    // 正确的编码器名称: pcm_s16le, pcm_s24le, pcm_s32le
+    const codecMap = {
+      16: 'pcm_s16le',
+      24: 'pcm_s24le',
+      32: 'pcm_s32le'
+    };
+    const codec = codecMap[bitsPerSample] || 'pcm_s16le';
+
     const ffmpegArgs = [
       '-i', input,
       '-ar', String(sampleRate),
       '-ac', String(channels),
-      '-f', 's' + bitsPerSample + 'le',  // signed bits-per-sample little-endian
-      '-acodec', 'pcm_' + bitsPerSample + 'le',
+      '-f', `s${bitsPerSample}le`,
+      '-acodec', codec,
     ];
 
     // 音量调节
@@ -71,7 +78,9 @@ export class AudioStreamer {
     console.log('[AudioStreamer] Starting FFmpeg:', 'ffmpeg', ffmpegArgs.join(' '));
 
     // 启动 FFmpeg
-    this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
 
     this.ffmpegProcess.on('error', (err) => {
       console.error('[AudioStreamer] FFmpeg error:', err);
@@ -87,7 +96,6 @@ export class AudioStreamer {
     // 错误输出
     this.ffmpegProcess.stderr.on('data', (data) => {
       const msg = data.toString();
-      // 只打印重要信息
       if (msg.includes('error') || msg.includes('Error')) {
         console.error('[FFmpeg]', msg);
       }
@@ -103,12 +111,9 @@ export class AudioStreamer {
 
     this.ffmpegProcess.stdout.on('data', (data) => {
       buffer = Buffer.concat([buffer, data]);
-
-      // 当缓冲区足够大时发送
       while (buffer.length >= chunkSize) {
         const chunk = buffer.subarray(0, chunkSize);
         buffer = buffer.subarray(chunkSize);
-
         this._sendUdpChunk(chunk);
       }
     });
@@ -119,14 +124,12 @@ export class AudioStreamer {
    */
   _calculateChunkSize() {
     const { sampleRate, bitsPerSample, channels } = this.config.audio;
-    const bufferMs = this.config.audio.bufferMs || 50; // 每个 UDP 包包含的音频时长
+    const bufferMs = this.config.audio.bufferMs || 50;
 
-    // chunkSize = sampleRate * channels * (bitsPerSample/8) * (bufferMs/1000)
     const bytesPerSample = bitsPerSample / 8;
     const samplesPerMs = sampleRate / 1000;
     const chunkSize = Math.floor(samplesPerMs * bufferMs * channels * bytesPerSample);
 
-    // 限制最大包大小为 65507 (UDP 最大有效载荷)
     return Math.min(chunkSize, 65000);
   }
 
@@ -135,7 +138,6 @@ export class AudioStreamer {
    */
   _sendUdpChunk(chunk) {
     const { host, port } = this.config.esp32;
-
     this.udpSocket.send(chunk, port, host, (err) => {
       if (err) {
         console.error('[AudioStreamer] UDP send error:', err);
@@ -161,7 +163,6 @@ export class AudioStreamer {
    */
   setVolume(volume) {
     this.volume = Math.max(0, Math.min(100, volume));
-    // 音量变化需要重启 FFmpeg
     if (this.isPlaying && this.currentSource) {
       if (this.currentSource.type === 'local') {
         this.playLocalFile(this.currentSource.path);

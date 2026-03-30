@@ -14,7 +14,7 @@
     "bufferMs": 500
   },
   "music": {
-    "localPaths": [],
+    "downloadPath": "./music",
     "supportedFormats": [".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".ape"]
   },
   "online": {
@@ -23,18 +23,14 @@
   },
   "radio": {
     "presets": [
-      {
-        "name": "BBC World Service",
-        "url": "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
-      },
-      {
-        "name": "Jazz FM",
-        "url": "https://edge-bauerall-01-gosshbp.dominantstream.com/jazz.mp3"
-      },
-      {
-        "name": "Classic FM",
-        "url": "https://media-ice.musicradio.com/ClassicFMMP3"
-      }
+      { "name": "BBC World Service", "url": "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service" },
+      { "name": "Jazz FM", "url": "https://edge-bauerall-01-gosshbp.dominantstream.com/jazz.mp3" },
+      { "name": "Classic FM", "url": "https://media-ice.musicradio.com/ClassicFMMP3" }
     ]
+  },
+  "ai": {
+    "provider": "nvidia-openai-qwen3-5",
+    "model": "z-ai/glm5",
+    "baseUrl": "https://integrate.api.nvidia.com/v1"
   }
 }
