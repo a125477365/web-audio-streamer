@@ -191,32 +191,38 @@ export class RecommendationEngine {
    * 查找 API Key
    */
   _findApiKey() {
-    // 尝试从环境变量获取
-    const envKeys = ['NVIDIA_API_KEY', 'OPENAI_API_KEY', 'API_KEY'];
-    for (const key of envKeys) {
-      if (process.env[key]) {
-        return process.env[key];
-      }
-    }
-    
-    // 尝试从 OpenClaw 配置获取
-    try {
-      const configPath = '/home/node/.openclaw/openclaw.json';
-      if (fs.existsSync(configPath)) {
-        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-        const providers = config.models?.providers || {};
-        for (const [name, provider] of Object.entries(providers)) {
-          if (provider.apiKey) {
-            return provider.apiKey;
-          }
-        }
-      }
-    } catch (e) {}
-    
-    return null;
-  }
+ // 1. 尝试从环境变量获取
+ const envKeys = ['NVIDIA_API_KEY', 'OPENAI_API_KEY', 'API_KEY'];
+ for (const key of envKeys) {
+ if (process.env[key]) {
+ return process.env[key];
+ }
+ }
+ 
+ // 2. 尝试从 OpenClaw api-keys.env 文件获取（支持多种路径）
+ const configPaths = [
+ process.env.OPENCLAW_HOME ? process.env.OPENCLAW_HOME + '/config/api-keys.env' : null,
+ process.env.HOME + '/.openclaw/config/api-keys.env',
+ '/home/node/.openclaw/config/api-keys.env',
+ '/root/.openclaw/config/api-keys.env',
+ ].filter(Boolean);
+ 
+ for (const configPath of configPaths) {
+ try {
+ if (fs.existsSync(configPath)) {
+ const envContent = fs.readFileSync(configPath, 'utf-8');
+ const match = envContent.match(/NVIDIA_API_KEY=(.+)/);
+ if (match) {
+ return match[1].trim();
+ }
+ }
+ } catch (e) {}
+ }
+ 
+ return null;
+ }
 
-  /**
+ /**
    * 调用 LLM
    */
   async _callLLM(baseUrl, apiKey, model, prompt) {
