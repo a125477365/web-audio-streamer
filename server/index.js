@@ -74,7 +74,91 @@ app.get('/api/local/directories', (req, res) => {
       });
     }
     
-    res.json({ success: true, directories: dirs, musicPath });
+    res.json({ success: true, directories: dirs, musicPath, lastBrowsePath: config.music.lastBrowsePath || '' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+/**
+ * 浏览目录树（支持从根目录浏览）
+ */
+app.get('/api/local/browse', (req, res) => {
+  try {
+    const { path: browsePath, root } = req.query;
+    
+    // 如果没有指定路径，根据操作系统显示根目录
+    let targetPath;
+    let basePath;
+    
+    if (!browsePath) {
+      // 首次加载：显示根目录
+      if (process.platform === 'win32') {
+        // Windows: 返回盘符列表
+        const drives = [];
+        // 常见盘符
+        for (let letter of 'CDEFGH'.split('')) {
+          const drivePath = letter + ':\\';
+          try {
+            fs.accessSync(drivePath, fs.constants.R_OK);
+            drives.push({ name: drivePath, path: drivePath, hasChildren: true, writable: false });
+          } catch (e) {}
+        }
+        return res.json({ success: true, directories: drives, path: 'root', isRoot: true, platform: 'win32' });
+      } else {
+        // Linux/macOS: 显示根目录
+        targetPath = '/';
+        basePath = '/';
+      }
+    } else {
+      targetPath = browsePath;
+      basePath = root || '/';
+    }
+    
+    if (!fs.existsSync(targetPath)) {
+      return res.json({ success: true, directories: [], path: targetPath });
+    }
+    
+    const items = fs.readdirSync(targetPath, { withFileTypes: true });
+    const directories = items
+      .filter(item => item.isDirectory())
+      .map(item => {
+        const fullPath = path.join(targetPath, item.name);
+        let hasChildren = false;
+        let writable = false;
+        try {
+          const subItems = fs.readdirSync(fullPath, { withFileTypes: true });
+          hasChildren = subItems.some(sub => sub.isDirectory());
+          fs.accessSync(fullPath, fs.constants.W_OK);
+          writable = true;
+        } catch (e) {}
+        return { name: item.name, path: fullPath, hasChildren, writable };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    
+    res.json({ 
+      success: true, 
+      directories, 
+      path: targetPath,
+      parent: targetPath !== '/' ? path.dirname(targetPath) : null,
+      platform: process.platform
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
+/**
+ * 保存最后浏览的目录路径
+ */
+app.post('/api/local/save-path', (req, res) => {
+  try {
+    const { path } = req.body;
+    config.music.lastBrowsePath = path || '';
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    res.json({ success: true, path: config.music.lastBrowsePath });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
