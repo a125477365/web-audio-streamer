@@ -27,7 +27,7 @@ export class RecommendationEngine {
     this.isPlaying = true;
     
     // 1. 获取本地音乐列表
-    const musicPath = this.config.music?.downloadPath || './music';
+    const musicPath = this.config.music?.path || './music';
     this.localMusicCache = this._scanLocalMusic(musicPath);
     
     if (this.localMusicCache.length === 0) {

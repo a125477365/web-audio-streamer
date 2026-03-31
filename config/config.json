@@ -14,9 +14,8 @@
     "bufferMs": 500
   },
   "music": {
-    "downloadPath": "./music",
-    "supportedFormats": [".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".ape"],
-    "lastBrowsePath": ""
+    "path": "./music",
+    "supportedFormats": [".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".ape"]
   },
   "online": {
     "provider": "netease",

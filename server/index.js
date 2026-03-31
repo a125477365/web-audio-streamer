@@ -31,7 +31,7 @@ if (!fs.existsSync(musicDir)) {
   fs.mkdirSync(musicDir, { recursive: true });
   console.log('[Server] Created music directory:', musicDir);
 }
-config.music.downloadPath = musicDir;
+config.music.path = musicDir;
 
 const app = express();
 const server = createServer(app);
@@ -58,7 +58,7 @@ const recommender = new RecommendationEngine(config);
  */
 app.get('/api/local/directories', (req, res) => {
   try {
-    const musicPath = config.music.downloadPath;
+    const musicPath = config.music.path;
     const dirs = [{ path: musicPath, name: '默认音乐目录' }];
     
     // 扫描子目录
@@ -74,7 +74,7 @@ app.get('/api/local/directories', (req, res) => {
       });
     }
     
-    res.json({ success: true, directories: dirs, musicPath, lastBrowsePath: config.music.lastBrowsePath || '' });
+    res.json({ success: true, directories: dirs, musicPath, lastBrowsePath: config.music.lastBrowse || '' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -156,9 +156,9 @@ app.get('/api/local/browse', (req, res) => {
 app.post('/api/local/save-path', (req, res) => {
   try {
     const { path } = req.body;
-    config.music.lastBrowsePath = path || '';
+    config.music.lastBrowse = path || '';
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-    res.json({ success: true, path: config.music.lastBrowsePath });
+    res.json({ success: true, path: config.music.lastBrowse });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -174,7 +174,7 @@ app.post('/api/local/mkdir', (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing directory name' });
     }
     
-    const basePath = parentPath || config.music.downloadPath;
+    const basePath = parentPath || config.music.path;
     const newPath = path.join(basePath, name);
     
     if (!fs.existsSync(newPath)) {
@@ -193,7 +193,7 @@ app.post('/api/local/mkdir', (req, res) => {
 app.get('/api/local/scan', async (req, res) => {
   try {
     const { path: scanPath, sortBy = 'name', page = 1, pageSize = 50 } = req.query;
-    const targetPath = scanPath || config.music.downloadPath;
+    const targetPath = scanPath || config.music.path;
     
     const result = await localScanner.scan(targetPath, { sortBy, page: +page, pageSize: +pageSize });
     res.json({ success: true, ...result });
@@ -486,7 +486,7 @@ server.listen(PORT, () => {
   console.log(` Web Audio Streamer v2.0`);
   console.log(`=================================`);
   console.log(` Server: http://localhost:${PORT}`);
-  console.log(` Music Dir: ${config.music.downloadPath}`);
+  console.log(` Music Dir: ${config.music.path}`);
   console.log(` ESP32: ${config.esp32.host}:${config.esp32.port}`);
   console.log(` Audio: ${config.audio.sampleRate}Hz / ${config.audio.bitsPerSample}bit`);
   console.log(`=================================`);

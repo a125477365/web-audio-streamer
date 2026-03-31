@@ -870,7 +870,7 @@
     const res = await fetch('/api/local/directories');
     const data = await res.json();
     if (data.success && data.musicPath) {
-      selectedDirectory.value = data.lastBrowsePath || data.musicPath;
+      selectedDirectory.value = data.lastBrowse || data.musicPath;
       await scanLocal();
     }
   } catch (e) {

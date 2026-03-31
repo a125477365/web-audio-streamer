@@ -10,7 +10,7 @@ import path from 'path';
 export class MusicDownloader {
   constructor(config) {
     this.config = config;
-    this.downloadPath = config.music?.downloadPath || './music';
+    this.path = config.music?.path || './music';
     this.progress = {};
   }
 
@@ -21,15 +21,15 @@ export class MusicDownloader {
     const { title = 'unknown', artist = 'unknown', format = 'mp3' } = options;
     
     // 确保下载目录存在
-    if (!fs.existsSync(this.downloadPath)) {
-      fs.mkdirSync(this.downloadPath, { recursive: true });
+    if (!fs.existsSync(this.path)) {
+      fs.mkdirSync(this.path, { recursive: true });
     }
     
     // 生成文件名
     const safeName = this._sanitizeFileName(`${artist} - ${title}`);
     const ext = this._getExtension(format);
     const filename = `${safeName}.${ext}`;
-    const filepath = path.join(this.downloadPath, filename);
+    const filepath = path.join(this.path, filename);
     
     // 如果文件已存在，直接返回
     if (fs.existsSync(filepath)) {
