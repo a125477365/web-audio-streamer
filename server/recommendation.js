@@ -6,6 +6,7 @@
 import https from 'https';
 import fs from 'fs';
 import path from 'path';
+import { OpenClawConfig } from './openclaw-config.js';
 
 export class RecommendationEngine {
   constructor(config) {
@@ -190,36 +191,19 @@ export class RecommendationEngine {
   /**
    * 查找 API Key
    */
-  _findApiKey() {
- // 1. 尝试从环境变量获取
- const envKeys = ['NVIDIA_API_KEY', 'OPENAI_API_KEY', 'API_KEY'];
- for (const key of envKeys) {
- if (process.env[key]) {
- return process.env[key];
+  async _initOpenClawConfig() {
+ if (!this.openclawConfig) {
+ this.openclawConfig = await new OpenClawConfig().init();
  }
  }
  
- // 2. 尝试从 OpenClaw api-keys.env 文件获取（支持多种路径）
- const configPaths = [
- process.env.OPENCLAW_HOME ? process.env.OPENCLAW_HOME + '/config/api-keys.env' : null,
- process.env.HOME + '/.openclaw/config/api-keys.env',
- '/home/node/.openclaw/config/api-keys.env',
- '/root/.openclaw/config/api-keys.env',
- ].filter(Boolean);
- 
- for (const configPath of configPaths) {
- try {
- if (fs.existsSync(configPath)) {
- const envContent = fs.readFileSync(configPath, 'utf-8');
- const match = envContent.match(/NVIDIA_API_KEY=(.+)/);
- if (match) {
- return match[1].trim();
- }
- }
- } catch (e) {}
+ _findApiKey() {
+ return null; // 由 _callAIForRecommendations 处理
  }
  
- return null;
+ async _getLLMConfig() {
+ await this._initOpenClawConfig();
+ return this.openclawConfig.getLLMConfig();
  }
 
  /**
