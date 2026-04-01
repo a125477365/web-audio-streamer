@@ -74,7 +74,7 @@ app.get('/api/local/directories', (req, res) => {
       });
     }
     
-    res.json({ success: true, directories: dirs, musicPath, lastBrowsePath: config.music.lastBrowse || '' });
+    res.json({ success: true, directories: dirs, musicPath, lastBrowse: config.music.lastBrowse || '' });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
