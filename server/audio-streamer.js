@@ -8,12 +8,12 @@ import dgram from 'dgram';
 import fs from 'fs';
 
 // ==================== 控制包协议 ====================
-// 
+//
 // 控制包格式:
 // [0xAA][0x55][seq(1字节)][length(2字节,大端)][JSON payload]
 //
 // seq: 序列号，用于匹配 ACK
-// 
+//
 // ACK 包格式:
 // [0xAA][0x55][seq(1字节)]['A']['C']['K'][length(2字节,大端)][JSON payload]
 //
@@ -53,6 +53,12 @@ function isAckPacket(parsed, expectedSeq) {
          parsed.payload.cmd === 'ack';
 }
 
+function formatTime(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
 export class AudioStreamer {
   constructor(config) {
     this.config = config;
@@ -62,8 +68,11 @@ export class AudioStreamer {
     this.shouldStop = false;  // 用户停止标志
     this.currentSource = null;
     this.currentSampleRate = null;
+    this.currentDuration = 0;  // 当前音频时长（秒）
+    this.playStartTime = null; // 播放开始时间
     this.volume = 100;
     this.statusCallbacks = [];
+    this.progressTimer = null; // 进度更新定时器
 
     // 创建 UDP socket
     this.udpSocket = dgram.createSocket('udp4');
@@ -97,32 +106,43 @@ export class AudioStreamer {
   }
 
   /**
-   * 用 ffprobe 探测音频信息
+   * 用 ffprobe 探测音频信息（包括时长）
    */
   _probeAudio(input) {
     try {
       const cmd = input.startsWith('http')
-        ? `ffprobe -v quiet -print_format json -show_streams -select_streams a "${input}"`
-        : `ffprobe -v quiet -print_format json -show_streams -select_streams a "${input}"`;
+        ? `ffprobe -v quiet -print_format json -show_streams -show_format "${input}"`
+        : `ffprobe -v quiet -print_format json -show_streams -show_format "${input}"`;
       const result = execSync(cmd, {
         timeout: 10000,
         encoding: 'utf-8',
         shell: true
       });
       const info = JSON.parse(result);
+      
+      // 获取时长（优先从 format 获取，更准确）
+      let duration = 0;
+      if (info.format && info.format.duration) {
+        duration = parseFloat(info.format.duration);
+      } else if (info.streams && info.streams.length > 0) {
+        // 从音频流获取时长
+        duration = parseFloat(info.streams[0].duration) || 0;
+      }
+      
       if (info.streams && info.streams.length > 0) {
-        const stream = info.streams[0];
+        const stream = info.streams.find(s => s.codec_type === 'audio') || info.streams[0];
         return {
           sampleRate: parseInt(stream.sample_rate) || 44100,
           channels: parseInt(stream.channels) || 2,
           bitsPerSample: parseInt(stream.bits_per_raw_sample) ||
-                         parseInt(stream.bits_per_sample) || 16
+                         parseInt(stream.bits_per_sample) || 16,
+          duration: duration
         };
       }
     } catch (err) {
       console.warn('[AudioStreamer] ffprobe failed, using defaults:', err.message);
     }
-    return { sampleRate: 44100, channels: 2, bitsPerSample: 16 };
+    return { sampleRate: 44100, channels: 2, bitsPerSample: 16, duration: 0 };
   }
 
   /**
@@ -237,18 +257,54 @@ export class AudioStreamer {
   }
 
   /**
+   * 启动进度更新定时器
+   */
+  _startProgressTimer() {
+    this._stopProgressTimer();
+    this.playStartTime = Date.now();
+    
+    this.progressTimer = setInterval(() => {
+      if (this.isPlaying && this.currentDuration > 0) {
+        const elapsed = (Date.now() - this.playStartTime) / 1000;
+        const progress = Math.min(elapsed / this.currentDuration, 1);
+        
+        this._updateStatus({
+          currentTime: elapsed,
+          duration: this.currentDuration,
+          currentTimeText: formatTime(elapsed),
+          durationText: formatTime(this.currentDuration),
+          progress: Math.round(progress * 100)
+        });
+      }
+    }, 1000);
+  }
+
+  /**
+   * 停止进度更新定时器
+   */
+  _stopProgressTimer() {
+    if (this.progressTimer) {
+      clearInterval(this.progressTimer);
+      this.progressTimer = null;
+    }
+  }
+
+  /**
    * 启动 FFmpeg 进程
    */
   async _startFFmpeg(input) {
     const { bitsPerSample, channels: configChannels } = this.config.audio;
 
-    // 探测源文件的实际音频参数
+    // 探测源文件的实际音频参数（包括时长）
     const probe = this._probeAudio(input);
     const actualSampleRate = probe.sampleRate;
     const actualChannels = configChannels || probe.channels;
+    const duration = probe.duration;
+    
     this.currentSampleRate = actualSampleRate;
+    this.currentDuration = duration;
 
-    console.log(`[AudioStreamer] Source probe: ${actualSampleRate}Hz / ${actualChannels}ch / ${probe.bitsPerSample}bit`);
+    console.log(`[AudioStreamer] Source probe: ${actualSampleRate}Hz / ${actualChannels}ch / ${probe.bitsPerSample}bit / ${duration.toFixed(1)}s`);
 
     // 编码器映射
     const codecMap = {
@@ -294,6 +350,7 @@ export class AudioStreamer {
 
     this.ffmpegProcess.on('error', (err) => {
       console.error('[AudioStreamer] FFmpeg error:', err);
+      this._stopProgressTimer();
       this._updateStatus({ isPlaying: false, error: err.message });
     });
 
@@ -307,7 +364,17 @@ export class AudioStreamer {
 
     // 4. 音频数据流 → UDP 发送（按实时速率控制）
     this.isPlaying = true;
-    this._updateStatus({ isPlaying: true, source: this.currentSource, sampleRate: actualSampleRate });
+    this._startProgressTimer();
+    this._updateStatus({ 
+      isPlaying: true, 
+      source: this.currentSource, 
+      sampleRate: actualSampleRate,
+      duration: duration,
+      durationText: formatTime(duration),
+      currentTime: 0,
+      currentTimeText: '0:00',
+      progress: 0
+    });
 
     // 按实际采样率计算 chunk 大小和发送间隔
     const chunkDurationMs = this.config.audio.bufferMs || 50;
@@ -352,6 +419,8 @@ export class AudioStreamer {
     // FFmpeg 结束时，继续发送剩余缓冲数据
     this.ffmpegProcess.on('close', (code) => {
       console.log('[AudioStreamer] FFmpeg closed with code:', code);
+      this._stopProgressTimer();
+      
       const drainBuffer = () => {
         if (buffer.length >= chunkSize) {
           const chunk = buffer.subarray(0, chunkSize);
@@ -394,6 +463,7 @@ export class AudioStreamer {
    */
   stop() {
     this.shouldStop = true;  // 标记停止
+    this._stopProgressTimer();
     if (this.ffmpegProcess) {
       this.ffmpegProcess.kill('SIGTERM');
       this.ffmpegProcess = null;
@@ -402,7 +472,14 @@ export class AudioStreamer {
     this.isPlaying = false;
     this.currentSource = null;
     this.currentSampleRate = null;
-    this._updateStatus({ isPlaying: false, source: null });
+    this.currentDuration = 0;
+    this._updateStatus({ 
+      isPlaying: false, 
+      source: null,
+      currentTime: 0,
+      currentTimeText: '0:00',
+      progress: 0
+    });
   }
 
   /**
@@ -428,6 +505,13 @@ export class AudioStreamer {
       volume: this.volume,
       source: this.currentSource,
       currentSampleRate: this.currentSampleRate,
+      duration: this.currentDuration,
+      durationText: formatTime(this.currentDuration),
+      currentTime: this.playStartTime ? (Date.now() - this.playStartTime) / 1000 : 0,
+      currentTimeText: this.playStartTime ? formatTime((Date.now() - this.playStartTime) / 1000) : '0:00',
+      progress: this.playStartTime && this.currentDuration > 0 
+        ? Math.min(Math.round(((Date.now() - this.playStartTime) / 1000 / this.currentDuration) * 100), 100) 
+        : 0,
       esp32: this.config.esp32,
       audio: this.config.audio,
     };
