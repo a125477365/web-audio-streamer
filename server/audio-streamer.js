@@ -7,20 +7,9 @@ import { spawn, execSync } from 'child_process';
 import dgram from 'dgram';
 import fs from 'fs';
 
-// ==================== 控制包协议 ====================
-//
-// 控制包格式:
-// [0xAA][0x55][seq(1字节)][length(2字节,大端)][JSON payload]
-//
-// seq: 序列号，用于匹配 ACK
-//
-// ACK 包格式 (与控制包相同，JSON 中 cmd="ack"):
-// [0xAA][0x55][seq(1字节)][length(2字节,大端)][JSON payload]
-//
-
 const CONTROL_MAGIC = Buffer.from([0xAA, 0x55]);
-const ACK_TIMEOUT_MS = 500; // ACK 超时时间
-const ACK_MAX_RETRIES = 10; // 最大重试次数
+const ACK_TIMEOUT_MS = 500;
+const ACK_MAX_RETRIES = 10;
 
 let seqCounter = 0;
 
@@ -71,27 +60,21 @@ export class AudioStreamer {
  this.volume = 100;
  this.statusCallbacks = [];
  this.progressTimer = null;
- this.sendTimer = null; // 发送定时器
- this._lock = false; // 播放锁
+ this.sendTimer = null;
+ this._lock = false;
 
- // 创建 UDP socket
  this.udpSocket = dgram.createSocket('udp4');
- // 绑定接收端口（用于接收 ACK）
  this.udpSocket.bind(0);
  }
 
- /**
- * 播放本地文件
- */
- async playLocalFile(filePath) {
+ async playLocalFile(filePath, seekTime = 0) {
  if (!fs.existsSync(filePath)) {
  throw new Error(`File not found: ${filePath}`);
  }
  
- // 如果正在播放，先停止
  if (this.isPlaying || this._lock) {
  this.stop();
- await new Promise(r => setTimeout(r, 100)); // 等待停止完成
+ await new Promise(r => setTimeout(r, 100));
  }
  
  this._lock = true;
@@ -99,17 +82,13 @@ export class AudioStreamer {
  this.stop();
  this.shouldStop = false;
  this.currentSource = { type: 'local', path: filePath };
- await this._startFFmpeg(filePath);
+ await this._startFFmpeg(filePath, seekTime);
  } finally {
  this._lock = false;
  }
  }
 
- /**
- * 播放在线 URL
- */
- async playUrl(url) {
- // 如果正在播放，先停止
+ async playUrl(url, seekTime = 0) {
  if (this.isPlaying || this._lock) {
  this.stop();
  await new Promise(r => setTimeout(r, 100));
@@ -120,15 +99,29 @@ export class AudioStreamer {
  this.stop();
  this.shouldStop = false;
  this.currentSource = { type: 'url', url };
- await this._startFFmpeg(url);
+ await this._startFFmpeg(url, seekTime);
  } finally {
  this._lock = false;
  }
  }
 
  /**
- * 用 ffprobe 探测音频信息（包括时长）
+ * 跳转到指定时间点
  */
+ async seek(seconds) {
+ if (!this.currentSource) return;
+ 
+ console.log(`[AudioStreamer] Seeking to ${seconds}s`);
+ 
+ const seekTime = Math.max(0, Math.min(seconds, this.currentDuration));
+ 
+ if (this.currentSource.type === 'local') {
+ await this.playLocalFile(this.currentSource.path, seekTime);
+ } else {
+ await this.playUrl(this.currentSource.url, seekTime);
+ }
+ }
+
  _probeAudio(input) {
  try {
  const cmd = input.startsWith('http')
@@ -159,9 +152,6 @@ export class AudioStreamer {
  return { sampleRate: 44100, channels: 2, bitsPerSample: 16, duration: 0 };
  }
 
- /**
- * 发送控制包并等待 ACK（最多重试 ACK_MAX_RETRIES 次）
- */
  async _sendControlWithAck(payload) {
  const { host, port } = this.config.esp32;
  const seq = (seqCounter++) & 0xFF;
@@ -225,9 +215,6 @@ export class AudioStreamer {
  });
  }
 
- /**
- * 发送控制包给 ESP32（无 ACK）
- */
  async _sendControlNoAck(payload) {
  const { host, port } = this.config.esp32;
  const seq = (seqCounter++) & 0xFF;
@@ -240,9 +227,6 @@ export class AudioStreamer {
  });
  }
 
- /**
- * 通知 ESP32 切换音频配置
- */
  async _notifyEsp32Config(sampleRate, bitsPerSample, channels) {
  console.log(`[AudioStreamer] Notifying ESP32: ${sampleRate}Hz / ${bitsPerSample}bit / ${channels}ch`);
  try {
@@ -260,24 +244,16 @@ export class AudioStreamer {
  }
  }
 
- /**
- * 停止播放（通知 ESP32）
- */
  async _notifyEsp32Stop() {
  this.shouldStop = true;
  try {
  await this._sendControlNoAck({ cmd: 'stop' });
- } catch (e) {
- // 忽略错误
- }
+ } catch (e) {}
  }
 
- /**
- * 启动进度更新定时器
- */
- _startProgressTimer() {
+ _startProgressTimer(seekTime = 0) {
  this._stopProgressTimer();
- this.playStartTime = Date.now();
+ this.playStartTime = Date.now() - seekTime * 1000; // 考虑跳转时间
  this.progressTimer = setInterval(() => {
  if (this.isPlaying && this.currentDuration > 0) {
  const elapsed = (Date.now() - this.playStartTime) / 1000;
@@ -293,9 +269,6 @@ export class AudioStreamer {
  }, 1000);
  }
 
- /**
- * 停止进度更新定时器
- */
  _stopProgressTimer() {
  if (this.progressTimer) {
  clearInterval(this.progressTimer);
@@ -303,10 +276,7 @@ export class AudioStreamer {
  }
  }
 
- /**
- * 启动 FFmpeg 进程
- */
- async _startFFmpeg(input) {
+ async _startFFmpeg(input, seekTime = 0) {
  const { bitsPerSample, channels: configChannels } = this.config.audio;
 
  const probe = this._probeAudio(input);
@@ -326,7 +296,6 @@ export class AudioStreamer {
  };
  const codec = codecMap[bitsPerSample] || 'pcm_s16le';
 
- // 先通知 ESP32 切换采样率
  try {
  await this._notifyEsp32Config(actualSampleRate, bitsPerSample, actualChannels);
  } catch (err) {
@@ -334,9 +303,9 @@ export class AudioStreamer {
  return;
  }
 
- // FFmpeg 参数
  const ffmpegArgs = [
  '-i', input,
+ '-ss', String(seekTime || 0),  // 跳转时间点（秒）
  '-ar', String(actualSampleRate),
  '-ac', String(actualChannels),
  '-f', `s${bitsPerSample}le`,
@@ -344,15 +313,13 @@ export class AudioStreamer {
  ];
 
  if (this.volume !== 100) {
- const volumeFilter = `volume=${this.volume / 100}`;
- ffmpegArgs.push('-af', volumeFilter);
+ ffmpegArgs.push('-af', `volume=${this.volume / 100}`);
  }
 
  ffmpegArgs.push('-');
 
  console.log('[AudioStreamer] FFmpeg:', 'ffmpeg', ffmpegArgs.join(' '));
 
- // 启动 FFmpeg
  this.ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
  stdio: ['ignore', 'pipe', 'pipe']
  });
@@ -364,24 +331,20 @@ export class AudioStreamer {
  });
 
  this.ffmpegProcess.stderr.on('data', (data) => {
- const msg = data.toString();
- if (msg.includes('error') || msg.includes('Error')) {
- console.error('[FFmpeg]', msg);
- }
+ // FFmpeg 日志，可以忽略
  });
 
- // 开始播放
  this.isPlaying = true;
- this._startProgressTimer();
+ this._startProgressTimer(seekTime);
  this._updateStatus({
  isPlaying: true,
  source: this.currentSource,
  sampleRate: actualSampleRate,
  duration: duration,
  durationText: formatTime(duration),
- currentTime: 0,
- currentTimeText: '0:00',
- progress: 0
+ currentTime: seekTime,
+ currentTimeText: formatTime(seekTime),
+ progress: duration > 0 ? Math.round((seekTime / duration) * 100) : 0
  });
 
  // 计算发送参数
@@ -392,60 +355,57 @@ export class AudioStreamer {
 
  console.log(`[AudioStreamer] Rate control: ${actualSampleRate}Hz, chunk=${chunkSize}B, interval=${chunkDurationMs}ms`);
 
+ // 缓冲区和发送状态
  let buffer = Buffer.alloc(0);
- const prefillChunks = 4;
  let sentChunks = 0;
- let lastSendTime = Date.now();
+ const prefillChunks = 4;
 
+ // 发送单个 chunk
  const sendChunk = () => {
- if (!this.isPlaying || this.shouldStop) return;
- 
+ if (!this.isPlaying || this.shouldStop) return false;
  if (buffer.length >= chunkSize) {
  const chunk = buffer.subarray(0, chunkSize);
  buffer = buffer.subarray(chunkSize);
  this._sendUdpChunk(chunk);
  sentChunks++;
+ return true;
  }
+ return false;
  };
 
+ // FFmpeg 数据到达
  this.ffmpegProcess.stdout.on('data', (data) => {
  buffer = Buffer.concat([buffer, data]);
 
- // 预填充
+ // 预填充：快速发送前几个 chunk
  while (sentChunks < prefillChunks && buffer.length >= chunkSize && this.isPlaying) {
- const chunk = buffer.subarray(0, chunkSize);
- buffer = buffer.subarray(chunkSize);
- this._sendUdpChunk(chunk);
- sentChunks++;
- }
-
- // 预填充完成后，按时间间隔发送
- if (sentChunks >= prefillChunks && this.isPlaying && !this.shouldStop) {
- const now = Date.now();
- const elapsed = now - lastSendTime;
- if (elapsed >= chunkDurationMs) {
  sendChunk();
- lastSendTime = now;
- }
  }
  });
 
+ // FFmpeg 结束
  this.ffmpegProcess.on('close', (code) => {
  console.log('[AudioStreamer] FFmpeg closed with code:', code);
+ // 发送剩余数据
+ while (buffer.length >= chunkSize) {
+ sendChunk();
+ }
+ if (buffer.length > 0) {
+ this._sendUdpChunk(buffer);
+ buffer = Buffer.alloc(0);
+ }
  this._stopAll();
  });
 
- // 使用 setInterval 替代递归 setTimeout，避免阻塞事件循环
+ // 启动定时发送（预填充后）
  this.sendTimer = setInterval(() => {
- if (this.isPlaying && !this.shouldStop && sentChunks >= prefillChunks) {
+ if (!this.isPlaying || this.shouldStop) return;
+ if (sentChunks >= prefillChunks) {
  sendChunk();
  }
  }, chunkDurationMs);
  }
 
- /**
- * 停止所有定时器和进程
- */
  _stopAll() {
  this._stopProgressTimer();
  if (this.sendTimer) {
@@ -466,9 +426,6 @@ export class AudioStreamer {
  });
  }
 
- /**
- * 发送 UDP 数据包到 ESP32
- */
  _sendUdpChunk(chunk) {
  const { host, port } = this.config.esp32;
  this.udpSocket.send(chunk, port, host, (err) => {
@@ -478,18 +435,12 @@ export class AudioStreamer {
  });
  }
 
- /**
- * 停止播放
- */
  stop() {
  this.shouldStop = true;
  this._notifyEsp32Stop();
  this._stopAll();
  }
 
- /**
- * 设置音量 (0-100)
- */
  setVolume(volume) {
  this.volume = Math.max(0, Math.min(100, volume));
  if (this.isPlaying && this.currentSource) {
@@ -501,9 +452,6 @@ export class AudioStreamer {
  }
  }
 
- /**
- * 获取当前状态
- */
  getStatus() {
  const currentTime = this.playStartTime && this.isPlaying
  ? (Date.now() - this.playStartTime) / 1000
@@ -526,16 +474,10 @@ export class AudioStreamer {
  };
  }
 
- /**
- * 注册状态变化回调
- */
  onStatusChange(callback) {
  this.statusCallbacks.push(callback);
  }
 
- /**
- * 更新状态并通知回调
- */
  _updateStatus(partial) {
  const status = this.getStatus();
  Object.assign(status, partial);
