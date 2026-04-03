@@ -11,10 +11,10 @@
     "sampleRate": 192000,
     "bitsPerSample": 32,
     "channels": 2,
-    "bufferMs": 500
+    "bufferMs": 10
   },
   "music": {
-    "path": "/home/node/.openclaw/workspace/web-audio-streamer/music",
+    "path": "C:\\Users\\Administrator\\.openclaw\\workspace\\web-audio-streamer\\music",
     "supportedFormats": [
       ".mp3",
       ".flac",
@@ -24,7 +24,7 @@
       ".m4a",
       ".ape"
     ],
-    "lastBrowse": "/home/node/.openclaw/workspace/web-audio-streamer/music"
+    "lastBrowse": "C:\\Users\\Administrator\\.openclaw\\workspace\\web-audio-streamer\\music"
   },
   "online": {
     "provider": "netease",
