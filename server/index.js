@@ -245,7 +245,7 @@ app.get('/api/local/play', async (req, res) => {
  return res.status(400).json({ success: false, error: 'Missing file parameter' });
  }
  const seekTime = seek ? parseFloat(seek) : 0;
- await audioStreamer.playLocalFile(file, seekTime);
+ audioStreamer.playLocalFile(file, seekTime);
  res.json({ success: true, message: `Playing: ${file}` });
  } catch (error) {
  res.status(500).json({ success: false, error: error.message });

@@ -14,17 +14,9 @@
     "bufferMs": 10
   },
   "music": {
-    "path": "C:\\Users\\Administrator\\.openclaw\\workspace\\web-audio-streamer\\music",
-    "supportedFormats": [
-      ".mp3",
-      ".flac",
-      ".wav",
-      ".aac",
-      ".ogg",
-      ".m4a",
-      ".ape"
-    ],
-    "lastBrowse": "C:\\Users\\Administrator\\.openclaw\\workspace\\web-audio-streamer\\music"
+    "path": "/home/node/.openclaw/workspace/web-audio-streamer/music",
+    "supportedFormats": [".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".ape"],
+    "lastBrowse": "/home/node/.openclaw/workspace/web-audio-streamer/music"
   },
   "online": {
     "provider": "netease",
@@ -32,18 +24,9 @@
   },
   "radio": {
     "presets": [
-      {
-        "name": "BBC World Service",
-        "url": "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
-      },
-      {
-        "name": "Jazz FM",
-        "url": "https://edge-bauerall-01-gosshbp.dominantstream.com/jazz.mp3"
-      },
-      {
-        "name": "Classic FM",
-        "url": "https://media-ice.musicradio.com/ClassicFMMP3"
-      }
+      { "name": "BBC World Service", "url": "https://stream.live.vc.bbcmedia.co.uk/bbc_world_service" },
+      { "name": "Jazz FM", "url": "https://edge-bauerall-01-gosshbp.dominantstream.com/jazz.mp3" },
+      { "name": "Classic FM", "url": "https://media-ice.musicradio.com/ClassicFMMP3" }
     ]
   }
 }
