@@ -702,26 +702,38 @@ async function loadTree(path = null) {
         }
         
         async function playLocal(path) {
-          const res = await api.get(`/local/play?file=${encodeURIComponent(path)}`);
-          if (res.success) {
-            const file = localFiles.value.find(f => f.path === path);
-            currentTrack.value = file ? { title: file.title, artist: file.artist } : null;
-            playingFile.value = path;
-          }
-        }
-        
-        async function playAllLocal() {
-          if (localFiles.value.length === 0) return;
-          const files = localFiles.value.map(f => f.path);
-          const res = await api.post('/local/play-batch', { files });
-          if (res.success) {
-            const firstFile = localFiles.value[0];
-            currentTrack.value = { title: firstFile.title, artist: firstFile.artist };
-            playingFile.value = firstFile.path;
-          }
-        }
-        
-        async function shuffleAllLocal() {
+	try {
+		const res = await api.get(`/local/play?file=${encodeURIComponent(path)}`);
+		if (res.success) {
+			const file = localFiles.value.find(f => f.path === path);
+			currentTrack.value = file ? { title: file.title, artist: file.artist } : null;
+			playingFile.value = path;
+		} else {
+			showError(res.error || '播放失败');
+		}
+	} catch (err) {
+		showError('连接设备异常，请检查设备是否在线');
+	}
+}
+
+async function playAllLocal() {
+	if (localFiles.value.length === 0) return;
+	try {
+		const files = localFiles.value.map(f => f.path);
+		const res = await api.post('/local/play-batch', { files });
+		if (res.success) {
+			const firstFile = localFiles.value[0];
+			currentTrack.value = { title: firstFile.title, artist: firstFile.artist };
+			playingFile.value = firstFile.path;
+		} else {
+			showError(res.error || '播放失败');
+		}
+	} catch (err) {
+		showError('连接设备异常，请检查设备是否在线');
+	}
+}
+
+async function shuffleAllLocal() {
           if (localFiles.value.length === 0) return;
           const files = localFiles.value.map(f => f.path);
           const res = await api.post('/local/play-batch', { files, shuffle: true });
