@@ -405,7 +405,7 @@ app.post('/api/control/stop', (req, res) => {
  res.json({ success: true, message: 'Stopped' });
 });
 
-app.post('/api/control/volume', (req, res) => {
+app.post('/api/control/pause', (req, res) => { audioStreamer.pause(); res.json({ success: true }); }); app.post('/api/control/resume', (req, res) => { audioStreamer.resume(); res.json({ success: true }); }); app.post('/api/control/volume', (req, res) => {
  const { volume } = req.body;
  if (typeof volume !== 'number' || volume < 0 || volume > 100) {
  return res.status(400).json({ success: false, error: 'Invalid volume (0-100)' });

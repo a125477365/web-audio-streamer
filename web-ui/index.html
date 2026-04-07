@@ -808,7 +808,7 @@
         
         // Controls
         async function stop() {
-          await api.post('/control/stop');
+          await api.post('/control/pause');
           currentTrack.value = null;
           playingFile.value = '';
           recommendStatus.value = { isPlaying: false };
@@ -834,16 +834,12 @@ async function seekTo(event) {
 
 // 播放控制
 function togglePlay() {
-  if (status.value.isPlaying) {
-    api.post('/control/stop').catch(e => console.error(e));
-  } else {
-    // 恢复播放：如果有当前曲目，重新播放
-    if (playingFile.value) {
-      playLocal(playingFile.value);
-    }
-  }
-}
-
+			if (status.value.isPlaying) {
+				api.post('/control/pause').catch(e => console.error(e));
+			} else {
+				api.post('/control/resume').catch(e => console.error(e));
+			}
+		}
 function prevTrack() {
   console.log('Prev track');
 }

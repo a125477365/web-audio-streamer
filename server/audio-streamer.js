@@ -304,18 +304,27 @@ export class AudioStreamer {
 
 		if (needReconfig) {
 			this._stopPlayback();
-			// 必须等待 ESP32 ACK 成功才能继续播放
-			await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
-			this.currentSampleRate = sampleRate;
-			this.currentChannels = channels;
-			this.currentBitsPerSample = bitsPerSample;
+			try {
+				// 必须等待 ESP32 ACK 成功才能继续播放
+				await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
+				this.currentSampleRate = sampleRate;
+				this.currentChannels = channels;
+				this.currentBitsPerSample = bitsPerSample;
+			} catch (err) {
+				// ESP32 无响应，重置配置以便下次重试
+				this.currentSampleRate = 0;
+				this.currentChannels = 0;
+				this.currentBitsPerSample = 0;
+				this.state = 'idle';
+				throw err;
+			}
 		} else {
 			this._stopPlayback();
 		}
 
 		this.currentTrack = { path: filePath, type: 'local' };
 		this.duration = duration;
-		this.seekOffset = seekTime; // 记录 seek 偏移
+		this.seekOffset = seekTime;
 		this.playStartTime = Date.now();
 
 		this.sender.start(sampleRate, channels, bitsPerSample);
@@ -350,11 +359,20 @@ export class AudioStreamer {
 
 		if (needReconfig) {
 			this._stopPlayback();
-			// 必须等待 ESP32 ACK 成功才能继续播放
-			await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
-			this.currentSampleRate = sampleRate;
-			this.currentChannels = channels;
-			this.currentBitsPerSample = bitsPerSample;
+			try {
+				// 必须等待 ESP32 ACK 成功才能继续播放
+				await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
+				this.currentSampleRate = sampleRate;
+				this.currentChannels = channels;
+				this.currentBitsPerSample = bitsPerSample;
+			} catch (err) {
+				// ESP32 无响应，重置配置以便下次重试
+				this.currentSampleRate = 0;
+				this.currentChannels = 0;
+				this.currentBitsPerSample = 0;
+				this.state = 'idle';
+				throw err;
+			}
 		} else {
 			this._stopPlayback();
 		}
