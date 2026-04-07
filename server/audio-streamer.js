@@ -548,14 +548,19 @@ export class AudioStreamer {
 
 	async _notifyEsp32Config(sampleRate, bitsPerSample, channels) {
 		console.log(`[AudioStreamer] Notifying ESP32: ${sampleRate}Hz / ${bitsPerSample}bit / ${channels}ch`);
-		const ack = await this.controlChannel.sendWithAck({
-			cmd: 'setAudioConfig',
-			sampleRate,
-			bitsPerSample,
-			channels
-		}, 10, 500);  // 10 次重试
-		console.log(`[AudioStreamer] ESP32 confirmed:`, ack?.status);
-		return ack;
+		try {
+			const ack = await this.controlChannel.sendWithAck({
+				cmd: 'setAudioConfig',
+				sampleRate,
+				bitsPerSample,
+				channels
+			}, 10, 500);  // 10 次重试
+			console.log(`[AudioStreamer] ESP32 confirmed:`, ack?.status);
+			return ack;
+		} catch (err) {
+			console.error(`[AudioStreamer] ESP32 not responding:`, err.message);
+			throw err;
+		}
 	}
 
 	_onPlaybackEnd() {
