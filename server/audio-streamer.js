@@ -304,11 +304,8 @@ export class AudioStreamer {
 
 		if (needReconfig) {
 			this._stopPlayback();
-			try {
-				await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
-			} catch (err) {
-				console.warn('[AudioStreamer] ESP32 config failed:', err.message);
-			}
+			// 必须等待 ESP32 ACK 成功才能继续播放
+			await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
 			this.currentSampleRate = sampleRate;
 			this.currentChannels = channels;
 			this.currentBitsPerSample = bitsPerSample;
@@ -353,11 +350,8 @@ export class AudioStreamer {
 
 		if (needReconfig) {
 			this._stopPlayback();
-			try {
-				await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
-			} catch (err) {
-				console.warn('[AudioStreamer] ESP32 config failed:', err.message);
-			}
+			// 必须等待 ESP32 ACK 成功才能继续播放
+			await this._notifyEsp32Config(sampleRate, bitsPerSample, channels);
 			this.currentSampleRate = sampleRate;
 			this.currentChannels = channels;
 			this.currentBitsPerSample = bitsPerSample;
@@ -536,17 +530,14 @@ export class AudioStreamer {
 
 	async _notifyEsp32Config(sampleRate, bitsPerSample, channels) {
 		console.log(`[AudioStreamer] Notifying ESP32: ${sampleRate}Hz / ${bitsPerSample}bit / ${channels}ch`);
-		try {
-			const ack = await this.controlChannel.sendWithAck({
-				cmd: 'setAudioConfig',
-				sampleRate,
-				bitsPerSample,
-				channels
-			}, 5, 500);
-			console.log(`[AudioStreamer] ESP32 confirmed:`, ack?.status);
-		} catch (err) {
-			console.warn('[AudioStreamer] ESP32 not responding:', err.message);
-		}
+		const ack = await this.controlChannel.sendWithAck({
+			cmd: 'setAudioConfig',
+			sampleRate,
+			bitsPerSample,
+			channels
+		}, 10, 500);  // 10 次重试
+		console.log(`[AudioStreamer] ESP32 confirmed:`, ack?.status);
+		return ack;
 	}
 
 	_onPlaybackEnd() {
