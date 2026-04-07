@@ -459,14 +459,15 @@
           @load-children="$emit('load-children', $event)"
         />
       </div>
-    </div>
+    
 	<!-- Error Toast -->
 	<div v-if="errorMessage" 
-		class="fixed top-4 right-4 bg-red-500/90 text-white px-6 py-3 rounded-lg shadow-lg z-50 flex items-center gap-3 animate-pulse">
+		class="fixed top-4 right-4 bg-red-500/90 text-white px-6 py-3 rounded-lg shadow-lg z-50 flex items-center gap-3">
 		<span>⚠️</span>
 		<span>{{ errorMessage }}</span>
 		<button @click="errorMessage = ''" class="ml-2 hover:bg-white/20 rounded px-2">✕</button>
 	</div>
+</div>
   </script>
   
   <script>
@@ -557,7 +558,6 @@
         const sortBy = ref('name');
         const playingFile = ref('');
 const errorMessage = ref('');
-const showErrorTimeout = ref(null);
         
         // Directory selector
         const showDirSelector = ref(false);
@@ -613,10 +613,7 @@ const showErrorTimeout = ref(null);
         
 function showError(msg) {
 	errorMessage.value = msg;
-	if (showErrorTimeout.value) clearTimeout(showErrorTimeout.value);
-	showErrorTimeout.value = setTimeout(() => {
-		errorMessage.value = '';
-	}, 5000);
+	setTimeout(() => { errorMessage.value = ''; }, 5000);
 }
 
 async function loadTree(path = null) {
@@ -705,21 +702,15 @@ async function loadTree(path = null) {
         }
         
         async function playLocal(path) {
-	try {
-		const res = await api.get(`/local/play?file=${encodeURIComponent(path)}`);
-		if (res.success) {
-			const file = localFiles.value.find(f => f.path === path);
-			currentTrack.value = file ? { title: file.title, artist: file.artist } : null;
-			playingFile.value = path;
-		} else {
-			showError(res.error || '播放失败');
-		}
-	} catch (err) {
-		showError('连接设备异常，请检查设备是否在线');
-	}
-}
-
-async function playAllLocal() {
+          const res = await api.get(`/local/play?file=${encodeURIComponent(path)}`);
+          if (res.success) {
+            const file = localFiles.value.find(f => f.path === path);
+            currentTrack.value = file ? { title: file.title, artist: file.artist } : null;
+            playingFile.value = path;
+          }
+        }
+        
+        async function playAllLocal() {
           if (localFiles.value.length === 0) return;
           const files = localFiles.value.map(f => f.path);
           const res = await api.post('/local/play-batch', { files });
@@ -728,10 +719,9 @@ async function playAllLocal() {
             currentTrack.value = { title: firstFile.title, artist: firstFile.artist };
             playingFile.value = firstFile.path;
           }
-        	} catch (err) {
-		showError('连接设备异常，请检查设备是否在线');
-	}
-}async function shuffleAllLocal() {
+        }
+        
+        async function shuffleAllLocal() {
           if (localFiles.value.length === 0) return;
           const files = localFiles.value.map(f => f.path);
           const res = await api.post('/local/play-batch', { files, shuffle: true });
