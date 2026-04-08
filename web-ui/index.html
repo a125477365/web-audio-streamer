@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Web Audio Streamer</title>
+  <title>Lossless Music</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -59,7 +59,7 @@
       <div class="p-6 border-b border-white/10">
         <h1 class="text-2xl font-bold gradient-text flex items-center gap-2">
           <span class="text-3xl">🎵</span>
-          Audio Streamer
+          Lossless Music
         </h1>
         <p class="text-xs text-gray-500 mt-1">ESP32: {{ esp32.host }}:{{ esp32.port }}</p>
       </div>
@@ -310,7 +310,40 @@
           </div>
         </div>
         
-        <!-- 设置 -->
+        <!-- 收藏 -->
+    <div v-if="activeTab === 'favorites'" class="space-y-6">
+      <div v-if="favorites.length > 0" class="glass rounded-xl overflow-hidden">
+        <div class="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+          <span class="font-medium">收藏列表 ({{ favorites.length }} 首)</span>
+          <button @click="playAllFavorites" class="btn-gradient px-4 py-2 rounded-lg text-sm">▶ 播放全部</button>
+        </div>
+        <div class="max-h-[calc(100vh-300px)] overflow-y-auto">
+          <div v-for="(song, i) in favorites" :key="song.id || song.path"
+               :class="isCurrentFavorite(song) ? 'playing' : ''"
+               class="music-item flex items-center gap-4 px-4 py-3 cursor-pointer"
+               @click="playFavorite(song)">
+            <div class="w-8 text-center text-gray-500">{{ i + 1 }}</div>
+            <div class="w-12 h-12 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
+              <span class="text-xl">🎵</span>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="font-medium truncate">{{ song.title }}</div>
+              <div class="text-sm text-gray-400 truncate">{{ song.artist }}</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button @click.stop="playFavorite(song)" class="glass px-4 py-2 rounded-lg text-sm hover:bg-white/10">▶ 播放</button>
+              <button @click.stop="removeFavorite(song)" class="text-red-400 hover:text-red-300 px-3 py-2 rounded-lg hover:bg-red-500/10">✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="glass rounded-xl p-12 text-center">
+        <div class="text-6xl mb-4">❤️</div>
+        <div class="text-xl text-gray-400">暂无收藏</div>
+        <div class="text-sm text-gray-500 mt-2">播放歌曲时点击收藏按钮添加</div>
+      </div>
+    </div>
+    <!-- 设置 -->
         <div v-if="activeTab === 'settings'" class="space-y-6">
           <div class="glass rounded-xl p-6">
             <h3 class="font-medium mb-4 flex items-center gap-2"><span>📡</span> ESP32 设备配置</h3>
@@ -326,45 +359,55 @@
             </div>
           </div>
           
-          <div class="glass rounded-xl p-6">
-            <h3 class="font-medium mb-4 flex items-center gap-2"><span>🔊</span> 音频配置</h3>
-            <div class="grid grid-cols-3 gap-4">
-              <div>
-                <label class="block text-sm text-gray-400 mb-2">采样率</label>
-                <select v-model.number="audio.sampleRate" class="w-full glass rounded-lg px-4 py-3 bg-transparent outline-none">
-                  <option :value="44100" class="bg-gray-800">44.1 kHz</option>
-                  <option :value="48000" class="bg-gray-800">48 kHz</option>
-                  <option :value="96000" class="bg-gray-800">96 kHz</option>
-                  <option :value="192000" class="bg-gray-800">192 kHz</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm text-gray-400 mb-2">位深</label>
-                <select v-model.number="audio.bitsPerSample" class="w-full glass rounded-lg px-4 py-3 bg-transparent outline-none">
-                  <option :value="16" class="bg-gray-800">16 bit</option>
-                  <option :value="24" class="bg-gray-800">24 bit</option>
-                  <option :value="32" class="bg-gray-800">32 bit</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm text-gray-400 mb-2">声道</label>
-                <select v-model.number="audio.channels" class="w-full glass rounded-lg px-4 py-3 bg-transparent outline-none">
-                  <option :value="1" class="bg-gray-800">单声道</option>
-                  <option :value="2" class="bg-gray-800">立体声</option>
-                </select>
-              </div>
-            </div>
           </div>
-        </div>
       </div>
-      
-      <!-- 底部播放栏 --> <div class="glass-dark px-6 py-3 border-t border-white/10"> <div class="flex flex-col gap-2"> <div class="flex items-center gap-4"> <div class="w-12 h-12 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center shadow-lg flex-shrink-0" :class="status.isPlaying ? 'cover-rotating' : 'cover-rotating paused'"> <span class="text-xl">🎵</span> </div> <div class="min-w-0 flex-1"> <div class="font-medium truncate">{{ currentTrack?.title || '未在播放' }}</div> <div class="text-xs text-gray-400 truncate">{{ currentTrack?.artist || '--' }}</div> </div> <div class="flex items-center gap-2"> <button @click="prevTrack" class="glass w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10">⏮</button> <button @click="togglePlay" class="btn-gradient w-10 h-10 rounded-full flex items-center justify-center shadow-lg">{{ status.isPlaying ? '⏸' : '▶' }}</button> <button @click="nextTrack" class="glass w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10">⏭</button> </div> <div class="flex items-center gap-2 w-32"> <span class="text-base">🔊</span> <input v-model.number="volume" type="range" min="0" max="100" class="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer" @change="setVolume" style="accent-color: #a855f7;"> <span class="text-xs text-gray-400 w-8 text-right">{{ volume }}%</span> </div> </div> <div class="flex items-center gap-2"> <span class="text-xs text-gray-400 w-10 text-right">{{ status.currentTimeText || '0:00' }}</span>
+    </div>
+    <!-- 底部播放栏 --> <div class="glass-dark px-6 py-3 border-t border-white/10"> <div class="flex flex-col gap-2"> <div class="flex items-center gap-4"> <div class="w-12 h-12 rounded-lg bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center shadow-lg flex-shrink-0" :class="status.isPlaying ? 'cover-rotating' : 'cover-rotating paused'"> <span class="text-xl">🎵</span> </div> <div class="min-w-0 flex-1"> <div class="font-medium truncate">{{ currentTrack?.title || '未在播放' }}</div> <div class="text-xs text-gray-400 truncate">{{ currentTrack?.artist || '--' }}</div> </div> <div class="flex items-center gap-2"> <button @click="prevTrack" class="glass w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10">⏮</button> <button @click="togglePlay" class="btn-gradient w-10 h-10 rounded-full flex items-center justify-center shadow-lg">{{ status.isPlaying ? '⏸' : '▶' }}</button> <button @click="nextTrack" class="glass w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10">⏭</button> </div> <div class="flex items-center gap-2 w-32"> <span class="text-base">🔊</span> <input v-model.number="volume" type="range" min="0" max="100" class="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer" @change="setVolume" style="accent-color: #a855f7;"> <span class="text-xs text-gray-400 w-8 text-right">{{ volume }}%</span> </div> </div> <div class="flex items-center gap-2"> <span class="text-xs text-gray-400 w-10 text-right">{{ status.currentTimeText || '0:00' }}</span>
                   <div class="flex-1 h-1.5 bg-white/10 rounded-full cursor-pointer" @click="seekTo">
                     <div class="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all" :style="{ width: (status.progress || 0) + '%' }"></div>
                   </div>
                   <span class="text-xs text-gray-400 w-10">{{ status.durationText || '0:00' }}</span> </div> </div> </div> </main></main>
     
-    <!-- 目录选择器模态框 -->
+    <!-- 播放列表模态框 -->
+  <div v-if="showPlaylistModal" class="fixed inset-0 bg-black/60 flex items-center justify-center modal-overlay" @click.self="showPlaylistModal = false">
+    <div class="glass-dark rounded-2xl p-6 w-[500px] max-h-[70vh] flex flex-col modal-content">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-medium flex items-center gap-2">
+          <span>📋</span> 播放列表
+          <span class="text-sm text-gray-400">({{ playlist.length }} 首)</span>
+        </h3>
+        <button @click="showPlaylistModal = false" class="text-gray-400 hover:text-white text-xl">✕</button>
+      </div>
+      <div class="flex items-center gap-2 mb-4">
+        <span class="text-sm text-gray-400">播放模式：</span>
+        <button @click="togglePlayMode" class="glass px-3 py-1 rounded-lg text-sm flex items-center gap-1">
+          {{ playModeIcon }} {{ playModeName }}
+        </button>
+        <button v-if="playlist.length > 0" @click="clearPlaylist" class="ml-auto glass px-3 py-1 rounded-lg text-sm hover:bg-white/10 text-red-400">清空列表</button>
+      </div>
+      <div v-if="playlist.length > 0" class="flex-1 overflow-y-auto">
+        <div v-for="(song, i) in playlist" :key="i"
+             :class="i === playlistIndex ? 'playing' : ''"
+             class="music-item flex items-center gap-3 px-4 py-2 cursor-pointer"
+             @click="playPlaylistIndex(i)">
+          <div class="w-8 text-center">
+            <span v-if="i === playlistIndex" class="text-purple-400">▶</span>
+            <span v-else class="text-gray-500">{{ i + 1 }}</span>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="font-medium truncate">{{ song.title }}</div>
+            <div class="text-sm text-gray-400 truncate">{{ song.artist }}</div>
+          </div>
+          <button @click.stop="removeFromPlaylist(i)" class="text-gray-500 hover:text-red-400 px-2">✕</button>
+        </div>
+      </div>
+      <div v-else class="flex-1 flex items-center justify-center text-gray-500">
+        播放列表为空
+      </div>
+    </div>
+  </div>
+
+  <!-- 目录选择器模态框 -->
     <div v-if="showDirSelector" class="fixed inset-0 bg-black/60 flex items-center justify-center modal-overlay" @click.self="showDirSelector = false">
       <div class="glass-dark rounded-2xl p-6 w-[550px] max-h-[75vh] flex flex-col modal-content">
         <div class="flex items-center justify-between mb-4">
@@ -523,12 +566,13 @@
       setup() {
         const activeTab = ref('local');
         const tabs = [
-          { id: 'local', name: '本地音乐', icon: '📁' },
-          { id: 'online', name: '在线搜索', icon: '🌐' },
-          { id: 'recommend', name: '私人FM', icon: '📻' },
-          { id: 'radio', name: '网络电台', icon: '📡' },
-          { id: 'settings', name: '设置', icon: '⚙️' },
-        ];
+      { id: 'local', name: '本地音乐', icon: '📁' },
+      { id: 'online', name: '在线搜索', icon: '🌐' },
+      { id: 'recommend', name: '私人FM', icon: '📻' },
+      { id: 'radio', name: '网络电台', icon: '📡' },
+      { id: 'favorites', name: '收藏', icon: '❤️' },
+      { id: 'settings', name: '设置', icon: '⚙️' },
+    ];
         const currentTabName = computed(() => tabs.find(t => t.id === activeTab.value)?.name || '');
         
         // 目录树相关
@@ -602,6 +646,16 @@ const errorMessage = ref('');
         const audio = ref({ sampleRate: 192000, bitsPerSample: 32, channels: 2 });
         
         let ws = null;
+    
+    // 播放列表和播放模式
+    const playlist = ref([]);
+    const playlistIndex = ref(-1);
+    const playMode = ref('sequence'); // single, sequence, random
+    const favorites = ref([]);
+    const showPlaylistModal = ref(false);
+    const selectedSearchResults = ref([]);
+    const recommendCurrentSong = ref(null);
+    const isLiveStream = ref(false);
         
         const api = {
           async get(path) {
@@ -937,6 +991,27 @@ function nextTrack() {
         
         onUnmounted(() => {
           if (ws) ws.close();
+// 播放模式相关计算属性
+const playModeIcon = computed(() => { const icons = { single: '🔂', sequence: '🔁', random: '🔀' }; return icons[playMode.value] || '🔁'; });
+const playModeName = computed(() => { const names = { single: '单曲循环', sequence: '顺序循环', random: '随机循环' }; return names[playMode.value] || '顺序循环'; });
+const playModeTitle = computed(() => { const titles = { single: '单曲循环', sequence: '顺序循环', random: '随机循环' }; return `当前: ${titles[playMode.value] || '顺序循环'} (点击切换)`; });
+const isFavorited = computed(() => { if (!currentTrack.value) return false; return favorites.value.some(f => (f.id && f.id === currentTrack.value.id) || (f.path && f.path === currentTrack.value.path) || (f.title === currentTrack.value.title && f.artist === currentTrack.value.artist)); });
+function togglePlayMode() { const modes = ['single', 'sequence', 'random']; const currentIdx = modes.indexOf(playMode.value); playMode.value = modes[(currentIdx + 1) % modes.length]; localStorage.setItem('playMode', playMode.value); }
+function toggleFavorite() { if (!currentTrack.value) return; const idx = favorites.value.findIndex(f => (f.id && f.id === currentTrack.value.id) || (f.path && f.path === currentTrack.value.path) || (f.title === currentTrack.value.title && f.artist === currentTrack.value.artist)); if (idx >= 0) { favorites.value.splice(idx, 1); } else { favorites.value.push({ ...currentTrack.value, id: currentTrack.value.id || Date.now() }); } localStorage.setItem('favorites', JSON.stringify(favorites.value)); }
+function isCurrentFavorite(song) { return currentTrack.value && ((song.id && song.id === currentTrack.value.id) || (song.path && song.path === currentTrack.value.path) || (song.title === currentTrack.value.title && song.artist === currentTrack.value.artist)); }
+function playFavorite(song) { currentTrack.value = { title: song.title, artist: song.artist, id: song.id, path: song.path }; if (song.path) { playLocal(song.path); } }
+function removeFavorite(song) { const idx = favorites.value.findIndex(f => (f.id && f.id === song.id) || (f.path && f.path === song.path) || (f.title === song.title && f.artist === song.artist)); if (idx >= 0) { favorites.value.splice(idx, 1); localStorage.setItem('favorites', JSON.stringify(favorites.value)); } }
+function playAllFavorites() { if (favorites.value.length === 0) return; playlist.value = [...favorites.value]; playlistIndex.value = 0; playPlaylistIndex(0); }
+function playPlaylistIndex(idx) { if (idx < 0 || idx >= playlist.value.length) return; playlistIndex.value = idx; const song = playlist.value[idx]; currentTrack.value = { title: song.title, artist: song.artist }; if (song.path) { playLocal(song.path); } }
+function removeFromPlaylist(idx) { playlist.value.splice(idx, 1); if (playlistIndex.value >= playlist.value.length) { playlistIndex.value = playlist.value.length - 1; } }
+function clearPlaylist() { playlist.value = []; playlistIndex.value = -1; }
+function toggleSelectAll() { if (selectedFiles.value.length === localFiles.value.length) { selectedFiles.value = []; } else { selectedFiles.value = localFiles.value.map(f => f.path); } }
+function playSelected() { if (selectedFiles.value.length === 0) return; const files = selectedFiles.value.map(path => { const f = localFiles.value.find(lf => lf.path === path); return { title: f.title, artist: f.artist, path: f.path }; }); playlist.value = files; playlistIndex.value = 0; playLocal(selectedFiles.value[0]); }
+function addToPlaylist(file) { playlist.value.push({ title: file.title, artist: file.artist, path: file.path }); }
+function toggleSearchResultSelect(id) { const idx = selectedSearchResults.value.indexOf(id); if (idx >= 0) { selectedSearchResults.value.splice(idx, 1); } else { selectedSearchResults.value.push(id); } }
+function playSelectedSearch() { if (selectedSearchResults.value.length === 0) return; const songs = selectedSearchResults.value.map(id => { const s = searchResults.value.find(r => r.id === id); return { title: s.title, artist: s.artist, id: s.id }; }); playlist.value = songs; playlistIndex.value = 0; const firstSong = searchResults.value.find(r => r.id === selectedSearchResults.value[0]); if (firstSong) playOnline(firstSong); }
+function addSelectedToPlaylist() { selectedSearchResults.value.forEach(id => { const s = searchResults.value.find(r => r.id === id); if (s) { playlist.value.push({ title: s.title, artist: s.artist, id: s.id }); } }); selectedSearchResults.value = []; }
+function addToPlaylistFromSearch(song) { playlist.value.push({ title: song.title, artist: song.artist, id: song.id }); }
         });
         
         return {
@@ -948,7 +1023,7 @@ function nextTrack() {
           searchQuery, searchResults, searching, downloadingSongs,
           recommendStatus, recommendPlaylist, recommending, localMusicCount,
           radios, customRadioUrl,
-          status, currentTrack, volume, esp32, audio,
+          status, currentTrack, volume, esp32, 
           // Methods
           loadTree, loadChildren, toggleExpand, navigateTo, selectDirectory, confirmDirectory,
           scanLocal, playLocal, playAllLocal, shuffleAllLocal, toggleSelect, createDirectory,
