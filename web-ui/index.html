@@ -96,7 +96,15 @@
       <header class="glass px-6 py-4 flex items-center justify-between">
         <h2 class="text-xl font-semibold">{{ currentTabName }}</h2>
         <div class="flex items-center gap-4">
-          <span :class="status.isPlaying ? 'text-green-400' : 'text-gray-500'" class="text-sm flex items-center gap-1">
+          <span v-if="status.esp32Connecting" class="text-yellow-400 text-sm flex items-center gap-1 animate-pulse">
+            <span class="w-2 h-2 rounded-full bg-yellow-400"></span>
+            正在连接设备... ({{ status.esp32RetryAttempt }}/{{ status.esp32RetryMax }})
+          </span>
+          <span v-else-if="status.esp32Failed" class="text-red-400 text-sm flex items-center gap-1 animate-pulse">
+            <span class="w-2 h-2 rounded-full bg-red-400"></span>
+            设备连接失败
+          </span>
+          <span v-else :class="status.isPlaying ? 'text-green-400' : 'text-gray-500'" class="text-sm flex items-center gap-1">
             <span class="w-2 h-2 rounded-full" :class="status.isPlaying ? 'bg-green-400' : 'bg-gray-500'"></span>
             {{ status.isPlaying ? '播放中' : '待机' }}
           </span>
@@ -558,6 +566,7 @@
         const sortBy = ref('name');
         const playingFile = ref('');
 const errorMessage = ref('');
+        const deviceError = ref(false);
         
         // Directory selector
         const showDirSelector = ref(false);
@@ -702,23 +711,31 @@ async function loadTree(path = null) {
         }
         
         async function playLocal(path) {
-	try {
-		const res = await api.get(`/local/play?file=${encodeURIComponent(path)}`);
-		if (res.success) {
-			const file = localFiles.value.find(f => f.path === path);
-			currentTrack.value = file ? { title: file.title, artist: file.artist } : null;
-			playingFile.value = path;
-		} else {
-			showError(res.error || '播放失败');
-		}
-	} catch (err) {
-		showError('连接设备异常，请检查设备是否在线');
-	}
-}
+          try {
+            deviceError.value = false;
+            const res = await api.get(`/local/play?file=${encodeURIComponent(path)}`);
+            if (res.success) {
+              const file = localFiles.value.find(f => f.path === path);
+              currentTrack.value = file ? { title: file.title, artist: file.artist } : null;
+              playingFile.value = path;
+            } else {
+              if (res.errorType === 'ESP32_CONNECTION_FAILED') {
+                deviceError.value = true;
+                showError('ESP32 设备无响应，请检查设备是否开机');
+              } else {
+                showError(res.error || '播放失败');
+              }
+            }
+          } catch (err) {
+            deviceError.value = true;
+            showError('连接设备异常，请检查设备是否在线');
+          }
+        }
 
 async function playAllLocal() {
 	if (localFiles.value.length === 0) return;
 	try {
+		deviceError.value = false;
 		const files = localFiles.value.map(f => f.path);
 		const res = await api.post('/local/play-batch', { files });
 		if (res.success) {
@@ -726,9 +743,15 @@ async function playAllLocal() {
 			currentTrack.value = { title: firstFile.title, artist: firstFile.artist };
 			playingFile.value = firstFile.path;
 		} else {
-			showError(res.error || '播放失败');
+			if (res.errorType === 'ESP32_CONNECTION_FAILED') {
+				deviceError.value = true;
+				showError('ESP32 设备无响应，请检查设备是否开机');
+			} else {
+				showError(res.error || '播放失败');
+			}
 		}
 	} catch (err) {
+		deviceError.value = true;
 		showError('连接设备异常，请检查设备是否在线');
 	}
 }
@@ -920,7 +943,7 @@ function nextTrack() {
           // Data
           activeTab, tabs, currentTabName,
           treeData, treeLoading, expandedPaths, rootPath, currentBrowsePath, breadcrumbs,
-          selectedDirectory, selectedDirectoryName, localFiles, selectedFiles, scanning, sortBy, playingFile,
+          selectedDirectory, selectedDirectoryName, localFiles, selectedFiles, scanning, sortBy, playingFile, deviceError,
           showDirSelector, showNewDirInput, newDirName,
           searchQuery, searchResults, searching, downloadingSongs,
           recommendStatus, recommendPlaylist, recommending, localMusicCount,

@@ -66,7 +66,7 @@ class UDPControlChannel {
 		});
 	}
 
-	async sendWithAck(payload, maxRetries = 5, timeoutMs = 500) {
+	async sendWithAck(payload, maxRetries = 5, timeoutMs = 500, onRetry = null) {
 		this.init();
 		const seq = (this.seqCounter++) & 0xFF;
 		const packet = buildControlPacket(payload, seq);
@@ -75,6 +75,9 @@ class UDPControlChannel {
 			let attempts = 0;
 			const trySend = () => {
 				attempts++;
+				if (onRetry) {
+					onRetry(attempts, maxRetries);
+				}
 				if (attempts > maxRetries) {
 					this.pendingAcks.delete(seq);
 					reject(new Error(`No ACK after ${maxRetries} attempts`));
@@ -272,6 +275,7 @@ export class AudioStreamer {
 		this.decoder = new FFmpegDecoder();
 		this.sender = new AudioSender(this.controlChannel);
 		this.statusCallbacks = [];
+		this.connectionStatus = { esp32Connecting: false, esp32RetryAttempt: 0, esp32RetryMax: 0, esp32Failed: false };
 		this._setupDecoderEvents();
 	}
 
@@ -315,6 +319,8 @@ export class AudioStreamer {
 				this.currentSampleRate = 0;
 				this.currentChannels = 0;
 				this.currentBitsPerSample = 0;
+				this.connectionStatus = { esp32Connecting: false, esp32RetryAttempt: 0, esp32RetryMax: 10, esp32Failed: true };
+				this._updateStatus(this.connectionStatus);
 				this.state = 'idle';
 				throw err;
 			}
@@ -370,6 +376,8 @@ export class AudioStreamer {
 				this.currentSampleRate = 0;
 				this.currentChannels = 0;
 				this.currentBitsPerSample = 0;
+				this.connectionStatus = { esp32Connecting: false, esp32RetryAttempt: 0, esp32RetryMax: 10, esp32Failed: true };
+				this._updateStatus(this.connectionStatus);
 				this.state = 'idle';
 				throw err;
 			}
@@ -497,7 +505,8 @@ export class AudioStreamer {
 			audio: this.config.audio,
 			sampleRate: this.currentSampleRate,
 			channels: this.currentChannels,
-			bitsPerSample: this.currentBitsPerSample
+			bitsPerSample: this.currentBitsPerSample,
+			...this.connectionStatus
 		};
 	}
 
@@ -549,12 +558,16 @@ export class AudioStreamer {
 	async _notifyEsp32Config(sampleRate, bitsPerSample, channels) {
 		console.log(`[AudioStreamer] Notifying ESP32: ${sampleRate}Hz / ${bitsPerSample}bit / ${channels}ch`);
 		try {
-			const ack = await this.controlChannel.sendWithAck({
-				cmd: 'setAudioConfig',
-				sampleRate,
-				bitsPerSample,
-				channels
-			}, 10, 500);  // 10 次重试
+			const ack = await this.controlChannel.sendWithAck(
+				{ cmd: 'setAudioConfig', sampleRate, bitsPerSample, channels },
+				10, 500,
+				(attempt, max) => {
+					this.connectionStatus = { esp32Connecting: true, esp32RetryAttempt: attempt, esp32RetryMax: max, esp32Failed: false };
+					this._updateStatus(this.connectionStatus);
+				}
+			);
+			this.connectionStatus = { esp32Connecting: false, esp32RetryAttempt: 0, esp32RetryMax: 0, esp32Failed: false };
+			this._updateStatus(this.connectionStatus);
 			console.log(`[AudioStreamer] ESP32 confirmed:`, ack?.status);
 			return ack;
 		} catch (err) {

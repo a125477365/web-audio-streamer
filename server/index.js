@@ -231,7 +231,8 @@ app.post('/api/local/play-batch', async (req, res) => {
  await audioStreamer.playLocalFile(playlist[0]);
  res.json({ success: true, playlist, currentIndex: 0 });
  } catch (error) {
- res.status(500).json({ success: false, error: error.message });
+ const isEsp32Error = error.message && error.message.includes('No ACK after');
+ res.status(500).json({ success: false, error: error.message, errorType: isEsp32Error ? 'ESP32_CONNECTION_FAILED' : 'PLAYBACK_ERROR' });
  }
 });
 
@@ -248,7 +249,8 @@ app.get('/api/local/play', async (req, res) => {
  await audioStreamer.playLocalFile(file, seekTime);
  res.json({ success: true, message: `Playing: ${file}` });
  } catch (error) {
- res.status(500).json({ success: false, error: error.message });
+ const isEsp32Error = error.message && error.message.includes('No ACK after');
+ res.status(500).json({ success: false, error: error.message, errorType: isEsp32Error ? 'ESP32_CONNECTION_FAILED' : 'PLAYBACK_ERROR' });
  }
 });
 
