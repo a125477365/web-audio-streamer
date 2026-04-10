@@ -471,9 +471,9 @@ app.get('/api/smart-source/config', async (req, res) => {
     res.json({ 
       success: true, 
       config: {
-        hasModels: !!config.models,
-        providerCount: config.models?.providers ? Object.keys(config.models.providers).length : 0,
-        apiKeysFound: Object.keys(config.apiKeys || {})
+        hasConfig: config.hasConfig || false,
+        defaultModel: config.defaultModel || null,
+        llmProvider: config.llmProvider || null
       }
     });
   } catch (error) {
