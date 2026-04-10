@@ -550,8 +550,8 @@
             .finally(function() { scanning.value = false; });
         }
         
-        function playOne(s) {
-deviceError.value = false; playlist.value = [{ title: s.title, artist: s.artist, path: s.path }]; playlistIdx.value = 0; savePlaylist();
+        function playOne(s, fromPlaylist) {
+deviceError.value = false; if (!fromPlaylist) { playlist.value = [{ title: s.title, artist: s.artist, path: s.path }]; playlistIdx.value = 0; savePlaylist(); }
           apiGet('/local/play?file=' + encodeURIComponent(s.path)).then(function(res) {
             if (res.success) {
               track.value = { title: s.title, artist: s.artist, path: s.path };
@@ -583,7 +583,7 @@ deviceError.value = false; playlist.value = [{ title: s.title, artist: s.artist,
           playlist.value = list;
           playlistIdx.value = 0;
           savePlaylist();
-          playOne(list[0]);
+          playOne(list[0], true);
         }
         
         function addAllToPlaylist() {
@@ -591,7 +591,7 @@ deviceError.value = false; playlist.value = [{ title: s.title, artist: s.artist,
           playlist.value = list;
           playlistIdx.value = 0;
           savePlaylist();
-          if (list.length > 0) playOne(list[0]);
+          if (list.length > 0) playOne(list[0], true);
         }
         
         // === Dir picker ===
@@ -633,7 +633,7 @@ deviceError.value = false; playlist.value = [{ title: s.title, artist: s.artist,
             .finally(function() { searching.value = false; });
         }
         
-        function playOnline(s) { playlist.value = [{ title: s.title, artist: s.artist, id: s.id }]; playlistIdx.value = 0; savePlaylist();
+        function playOnline(s, fromPlaylist) { if (!fromPlaylist) { playlist.value = [{ title: s.title, artist: s.artist, id: s.id }]; playlistIdx.value = 0; savePlaylist(); }
           apiGet('/online/play?id=' + s.id).then(function(res) {
             if (res.success) {
               track.value = { title: s.title, artist: s.artist, id: s.id };
@@ -658,7 +658,7 @@ function formatDuration(ms) { if (!ms) return '--:--'; var seconds = Math.floor(
           playlist.value = list;
           playlistIdx.value = 0;
           var first = results.value.find(function(x) { return x.id === selOnline.value[0]; });
-          if (first) playOnline(first);
+          if (first) playOnline(first, true);
         }
         
         // === FM ===
@@ -740,8 +740,8 @@ function formatDuration(ms) { if (!ms) return '--:--'; var seconds = Math.floor(
           localStorage.setItem('playlistIdx', i);
           var s = playlist.value[i];
           track.value = { title: s.title, artist: s.artist };
-          if (s.path) playOne(s);
-          else if (s.id) playOnline(s);
+          if (s.path) playOne(s, true);
+          else if (s.id) playOnline(s, true);
         }
         function savePlaylist() {
           localStorage.setItem('playlist', JSON.stringify(playlist.value));
@@ -778,8 +778,8 @@ function formatDuration(ms) { if (!ms) return '--:--'; var seconds = Math.floor(
         
         function playFavorite(s) {
           track.value = { title: s.title, artist: s.artist, id: s.id, path: s.path };
-          if (s.path) playOne(s);
-          else if (s.id) playOnline(s);
+          if (s.path) playOne(s, true);
+          else if (s.id) playOnline(s, true);
         }
         
         function playAllFavorites() {
