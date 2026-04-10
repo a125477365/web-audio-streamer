@@ -551,7 +551,7 @@
         }
         
         function playOne(s) {
-          deviceError.value = false;
+deviceError.value = false; playlist.value = [{ title: s.title, artist: s.artist, path: s.path }]; playlistIdx.value = 0; savePlaylist();
           apiGet('/local/play?file=' + encodeURIComponent(s.path)).then(function(res) {
             if (res.success) {
               track.value = { title: s.title, artist: s.artist, path: s.path };
@@ -633,7 +633,7 @@
             .finally(function() { searching.value = false; });
         }
         
-        function playOnline(s) {
+        function playOnline(s) { playlist.value = [{ title: s.title, artist: s.artist, id: s.id }]; playlistIdx.value = 0; savePlaylist();
           apiGet('/online/play?id=' + s.id).then(function(res) {
             if (res.success) {
               track.value = { title: s.title, artist: s.artist, id: s.id };
