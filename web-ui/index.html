@@ -196,6 +196,9 @@
           <span class="status-badge" :class="status.isPlaying ? 'status-playing' : 'status-idle'">
             {{ status.isPlaying ? '▶ 播放中' : '⏸ 待机' }}
           </span>
+          <span v-if="deviceError" class="status-badge" style="background:#3a1a1a;color:#f87171;">
+            ⚠️ 设备连接失败
+          </span>
         </div>
         
         <div class="content">
@@ -480,6 +483,7 @@
         var scanning = ref(false);
         var sortBy = ref('name');
         var playingPath = ref('');
+        var deviceError = ref(false);
         
         // Online
         var searchQ = ref('');
@@ -577,11 +581,20 @@
         }
         
         function playOne(s) {
+          deviceError.value = false;
           apiGet('/local/play?file=' + encodeURIComponent(s.path)).then(function(res) {
             if (res.success) {
               track.value = { title: s.title, artist: s.artist, path: s.path };
               playingPath.value = s.path;
+            } else {
+              if (res.errorType === 'ESP32_CONNECTION_FAILED') {
+                deviceError.value = true;
+              }
+              console.error('Play failed:', res.error);
             }
+          }).catch(function(e) {
+            deviceError.value = true;
+            console.error('Play error:', e);
           });
         }
         
@@ -599,6 +612,7 @@
           });
           playlist.value = list;
           playlistIdx.value = 0;
+          savePlaylist();
           playOne(list[0]);
         }
         
@@ -606,6 +620,7 @@
           var list = songs.value.map(function(s) { return { title: s.title, artist: s.artist, path: s.path }; });
           playlist.value = list;
           playlistIdx.value = 0;
+          savePlaylist();
           if (list.length > 0) playOne(list[0]);
         }
         
@@ -750,15 +765,21 @@
         // === Playlist ===
         function playPlaylistAt(i) {
           playlistIdx.value = i;
+          localStorage.setItem('playlistIdx', i);
           var s = playlist.value[i];
           track.value = { title: s.title, artist: s.artist };
           if (s.path) playOne(s);
           else if (s.id) playOnline(s);
         }
+        function savePlaylist() {
+          localStorage.setItem('playlist', JSON.stringify(playlist.value));
+          localStorage.setItem('playlistIdx', playlistIdx.value);
+        }
         
         function removeFromPlaylist(i) {
           playlist.value.splice(i, 1);
           if (playlistIdx.value >= playlist.value.length) playlistIdx.value = playlist.value.length - 1;
+          savePlaylist();
         }
         
         // === Favorites ===
@@ -826,6 +847,19 @@
           var saved = localStorage.getItem('playMode');
           if (saved) playMode.value = saved;
           
+          // Load saved playlist
+          var savedPlaylist = localStorage.getItem('playlist');
+          if (savedPlaylist) {
+            try {
+              var parsed = JSON.parse(savedPlaylist);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                playlist.value = parsed;
+                var savedIdx = parseInt(localStorage.getItem('playlistIdx') || '0');
+                playlistIdx.value = savedIdx >= 0 && savedIdx < parsed.length ? savedIdx : 0;
+              }
+            } catch (e) {}
+          }
+          
           // Load saved directory
           apiGet('/local/directories').then(function(res) {
             if (res.success && res.musicPath) {
@@ -842,7 +876,7 @@
         
         // === Return ===
         return {
-          tab, tabTitle, track, status, volume, esp32, isLive,
+          tab, tabTitle, track, status, volume, esp32, isLive, deviceError,
           musicDir, dirName, songs, selLocal, scanning, sortBy, playingPath,
           searchQ, results, searching, searched, selOnline,
           playlist, playlistIdx, playMode, showPlaylist, playModeIcon, playModeName, playModeTitle,
