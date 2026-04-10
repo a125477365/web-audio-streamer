@@ -461,6 +461,7 @@
         var searching = ref(false);
 var smartSearching = ref(false);
 var sourceInfo = ref(null);
+var sourceInfo = ref(null);
         var searched = ref(false);
         var selOnline = ref([]);
         
@@ -862,7 +863,7 @@ function formatDuration(ms) { if (!ms) return '--:--'; var seconds = Math.floor(
           radios, customRadioUrl,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
-          doSearch, playOnline, toggleSelOnline, selectAllOnline, formatDuration, playSelectedOnline,
+          doSearch, smartSearch, playOnline, toggleSelOnline, selectAllOnline, formatDuration, playSelectedOnline,
           startFM, stopFM,
           playRadio, playCustomRadio,
           togglePlay, setVolume, seek, prev, next, togglePlayMode,
