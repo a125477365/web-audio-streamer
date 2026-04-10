@@ -62,6 +62,9 @@
     .song-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .song-artist { font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .song-size { font-size: 12px; color: #666; width: 70px; text-align: right; flex-shrink: 0; }
+.song-meta { font-size: 12px; color: #888; flex-shrink: 0; }
+.song-duration { width: 50px; text-align: center; }
+.song-bitrate { width: 70px; text-align: center; color: #a78bfa; }
     .song-actions { display: flex; gap: 4px; flex-shrink: 0; }
     .song-num { width: 24px; text-align: center; color: #555; font-size: 13px; flex-shrink: 0; }
     
@@ -238,40 +241,7 @@
             </div>
           </template>
           
-          <!-- 在线搜索 -->
-          <template v-if="tab === 'online'">
-            <div class="search-box">
-              <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch">
-              <button class="btn btn-primary" @click="doSearch" :disabled="searching">{{ searching ? '搜索中...' : '搜索' }}</button>
-            </div>
-            <div class="selection-bar" v-if="selOnline.length > 0">
-              <span class="selection-count">已选 {{ selOnline.length }} 首</span>
-              <button class="btn btn-small btn-primary" @click="playSelectedOnline">▶ 播放选中</button>
-              <button class="btn btn-small btn-secondary" @click="selOnline = []">取消选择</button>
-            </div>
-            <ul class="song-list" v-if="results.length > 0">
-              <li class="song-item" v-for="s in results" :key="s.id" @click="playOnline(s)">
-                <div class="song-check" :class="{ checked: selOnline.includes(s.id) }" @click.stop="toggleSelOnline(s.id)">{{ selOnline.includes(s.id) ? '☑' : '☐' }}</div>
-                <div class="song-info">
-                  <div class="song-title">{{ s.title }}</div>
-                  <div class="song-artist">{{ s.artist }} - {{ s.album }}</div>
-                </div>
-                <div class="song-actions">
-                  <button class="btn btn-small btn-primary" @click.stop="playOnline(s)">▶</button>
-                </div>
-              </li>
-            </ul>
-            <div class="empty-state" v-else-if="searched">
-              <div class="empty-icon">🔍</div>
-              <div class="empty-text">没有找到结果</div>
-            </div>
-            <div class="empty-state" v-else>
-              <div class="empty-icon">🌐</div>
-              <div class="empty-text">搜索在线音乐</div>
-            </div>
-          </template>
-          
-          <!-- 私人FM -->
+          <!-- 在线搜索 --> <template v-if="tab === 'online'"> <div class="search-box"> <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch"> <button class="btn btn-primary" @click="doSearch" :disabled="searching">{{ searching ? '搜索中...' : '搜索' }}</button> </div> <div class="selection-bar"> <button class="btn btn-small btn-secondary" @click="selectAllOnline">{{ selOnline.length === results.length && results.length > 0 ? '取消全选' : '全选' }}</button> <span class="selection-count" v-if="selOnline.length > 0">已选 {{ selOnline.length }} 首</span> <button class="btn btn-small btn-primary" @click="playSelectedOnline" v-if="selOnline.length > 0">▶ 播放选中</button> <button class="btn btn-small btn-secondary" @click="selOnline = []" v-if="selOnline.length > 0">取消选择</button> </div> <ul class="song-list" v-if="results.length > 0"> <li class="song-item" v-for="s in results" :key="s.id" @click="playOnline(s)"> <div class="song-check" :class="{ checked: selOnline.includes(s.id) }" @click.stop="toggleSelOnline(s.id)">{{ selOnline.includes(s.id) ? '☑' : '☐' }}</div> <div class="song-info"> <div class="song-title">{{ s.title }}</div> <div class="song-artist">{{ s.artist }} - {{ s.album }}</div> </div> <div class="song-meta song-duration">{{ formatDuration(s.duration) }}</div> <div class="song-meta song-size">{{ s.sizeText || '未知' }}</div> <div class="song-meta song-bitrate">{{ s.bitrate || '未知' }}</div> <div class="song-actions"> <button class="btn btn-small btn-primary" @click.stop="playOnline(s)">▶</button> </div> </li> </ul> <div class="empty-state" v-else-if="searched"> <div class="empty-icon">🔍</div> <div class="empty-text">没有找到结果</div> </div> <div class="empty-state" v-else> <div class="empty-icon">🌐</div> <div class="empty-text">搜索在线音乐</div> </div> </template> <!-- 私人FM -->
           <template v-if="tab === 'fm'">
             <div class="fm-card">
               <div class="fm-icon">📻</div>
@@ -677,6 +647,8 @@
           else selOnline.value.push(id);
         }
         
+function selectAllOnline() { if (selOnline.value.length === results.value.length) { selOnline.value = []; } else { selOnline.value = results.value.map(function(s) { return s.id; }); } }
+function formatDuration(ms) { if (!ms) return '--:--'; var seconds = Math.floor(ms / 1000); var mins = Math.floor(seconds / 60); var secs = seconds % 60; return mins + ':' + (secs < 10 ? '0' : '') + secs; }
         function playSelectedOnline() {
           if (selOnline.value.length === 0) return;
           var list = selOnline.value.map(function(id) {
@@ -886,7 +858,7 @@
           radios, customRadioUrl,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
-          doSearch, playOnline, toggleSelOnline, playSelectedOnline,
+          doSearch, playOnline, toggleSelOnline, selectAllOnline, formatDuration, playSelectedOnline,
           startFM, stopFM,
           playRadio, playCustomRadio,
           togglePlay, setVolume, seek, prev, next, togglePlayMode,
