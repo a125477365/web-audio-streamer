@@ -633,8 +633,10 @@ deviceError.value = false; if (!fromPlaylist) { playlist.value = [{ title: s.tit
             .finally(function() { searching.value = false; });
         }
         
-        function playOnline(s, fromPlaylist) { if (!fromPlaylist) { playlist.value = [{ title: s.title, artist: s.artist, id: s.id }]; playlistIdx.value = 0; savePlaylist(); }
-          apiGet('/online/play?id=' + s.id).then(function(res) {
+        function playOnline(s, fromPlaylist) { if (!fromPlaylist) { playlist.value = [{ title: s.title, artist: s.artist, id: s.id, playUrl: s.playUrl }]; playlistIdx.value = 0; savePlaylist(); }
+          var playUrl = s.playUrl || '';
+var apiUrl = '/online/play?' + (playUrl ? 'url=' + encodeURIComponent(playUrl) : 'id=' + s.id);
+apiGet(apiUrl).then(function(res) {
             if (res.success) {
               track.value = { title: s.title, artist: s.artist, id: s.id };
             }

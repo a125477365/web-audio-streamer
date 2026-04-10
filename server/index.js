@@ -312,17 +312,21 @@ app.get('/api/online/url', async (req, res) => {
  * 播放在线歌曲
  */
 app.get('/api/online/play', async (req, res) => {
- try {
- const { id } = req.query;
- if (!id) {
- return res.status(400).json({ success: false, error: 'Missing song id' });
- }
- const url = await onlineApi.getSongUrl(id);
- await audioStreamer.playUrl(url);
- res.json({ success: true, message: 'Playing online song' });
- } catch (error) {
- res.status(500).json({ success: false, error: error.message });
- }
+  try {
+    const { id, url } = req.query;
+    // 优先使用直接传入的URL（搜索结果中已包含auth）
+    let playUrl = url;
+    if (!playUrl && id) {
+      playUrl = await onlineApi.getSongUrl(id);
+    }
+    if (!playUrl) {
+      return res.status(400).json({ success: false, error: 'Missing song url or id' });
+    }
+    await audioStreamer.playUrl(playUrl);
+    res.json({ success: true, message: 'Playing online song' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 /**
