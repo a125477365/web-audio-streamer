@@ -1,7 +1,8 @@
 /**
  * 智能音源搜索模块
  * 
- * 自动读取 OpenClaw 配置，使用默认模型进行智能搜索
+ * 动态查找并解析 OpenClaw 配置文件，使用默认模型进行智能搜索
+ * 不硬编码任何路径或模型信息
  */
 
 import https from 'https';
@@ -9,27 +10,6 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-
-// OpenClaw 配置路径（跨平台）
-function getOpenClawConfigPaths() {
-  const home = os.homedir();
-  return {
-    linux: [
-      path.join(home, '.openclaw', 'openclaw.json'),
-      path.join(home, '.openclaw', 'agents', 'main', 'agent', 'models.json'),
-      '/app/openclaw.json',
-      '/app/agents/main/agent/models.json',
-    ],
-    darwin: [
-      path.join(home, '.openclaw', 'openclaw.json'),
-      path.join(home, '.openclaw', 'agents', 'main', 'agent', 'models.json'),
-    ],
-    win32: [
-      path.join(home, '.openclaw', 'openclaw.json'),
-      path.join(home, '.openclaw', 'agents', 'main', 'agent', 'models.json'),
-    ]
-  };
-}
 
 // 已知的音源API列表（用于测试）
 const KNOWN_SOURCES = [
@@ -71,131 +51,198 @@ const KNOWN_SOURCES = [
 export class SmartSourceFinder {
   constructor(config) {
     this.config = config;
-    this.openClawConfig = null;
-    this.defaultModel = null;
-    this.llmProvider = null;
-    this.testResults = [];
+    // 不保存任何配置，每次都重新解析
   }
 
   /**
-   * 自动检测并加载 OpenClaw 配置
+   * 动态查找 OpenClaw 安装目录
+   * 遵循 XDG Base Directory Specification
    */
-  async detectOpenClawConfig() {
-    const platform = os.platform();
-    const paths = getOpenClawConfigPaths()[platform] || getOpenClawConfigPaths().linux;
+  _findOpenClawInstallDir() {
+    const candidates = [];
     
-    let openclawJson = null;
-    let modelsJson = null;
-
-    // 优先查找 openclaw.json
-    for (const p of paths) {
-      if (p.includes('openclaw.json') && fs.existsSync(p)) {
-        try {
-          openclawJson = JSON.parse(fs.readFileSync(p, 'utf-8'));
-          console.log(`[SmartSource] Found openclaw.json: ${p}`);
-          break;
-        } catch (e) {
-          console.log(`[SmartSource] Failed to parse ${p}:`, e.message);
+    // 1. 检查环境变量
+    if (process.env.OPENCLAW_HOME) {
+      candidates.push(process.env.OPENCLAW_HOME);
+    }
+    
+    // 2. 检查标准位置
+    const home = os.homedir();
+    candidates.push(path.join(home, '.openclaw'));
+    
+    // 3. 检查系统级安装位置
+    if (process.platform === 'linux') {
+      candidates.push('/opt/openclaw');
+      candidates.push('/usr/local/openclaw');
+      candidates.push('/app');  // Docker/容器环境
+    }
+    
+    // 4. 检查工作目录附近的可能位置
+    const cwd = process.cwd();
+    candidates.push(path.join(cwd, '.openclaw'));
+    candidates.push(path.dirname(cwd));
+    
+    // 返回第一个存在的目录
+    for (const dir of candidates) {
+      try {
+        if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+          return dir;
         }
+      } catch (e) {
+        // 忽略权限错误等
       }
     }
-
-    // 如果没找到，尝试 models.json
-    if (!openclawJson) {
-      for (const p of paths) {
-        if (p.includes('models.json') && fs.existsSync(p)) {
-          try {
-            modelsJson = JSON.parse(fs.readFileSync(p, 'utf-8'));
-            console.log(`[SmartSource] Found models.json: ${p}`);
-            break;
-          } catch (e) {}
-        }
-      }
-    }
-
-    if (!openclawJson && !modelsJson) {
-      console.log('[SmartSource] No OpenClaw config found, using fallback');
-      return this._getFallbackConfig();
-    }
-
-    this.openClawConfig = openclawJson;
-    return this._parseOpenClawConfig(openclawJson, modelsJson);
+    
+    return null;
   }
 
   /**
-   * 解析 OpenClaw 配置，提取默认模型信息
+   * 在指定目录中查找配置文件
    */
-  _parseOpenClawConfig(openclawJson, modelsJson) {
-    let providers = {};
-    let defaultModel = null;
+  _findConfigFile(dir, filename) {
+    const candidates = [
+      path.join(dir, filename),
+      path.join(dir, 'config', filename),
+      path.join(dir, 'agents', 'main', 'agent', filename),
+    ];
+    
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+          return p;
+        }
+      } catch (e) {}
+    }
+    
+    return null;
+  }
 
-    if (openclawJson) {
-      // 从 openclaw.json 提取
-      providers = openclawJson.models?.providers || {};
-      
-      // 获取默认模型
-      const defaultPrimary = openclawJson.agents?.defaults?.model?.primary;
-      if (defaultPrimary) {
-        // 格式: "provider/model-id"
-        const [providerKey, modelId] = defaultPrimary.split('/');
-        defaultModel = {
-          provider: providerKey,
-          modelId: modelId,
+  /**
+   * 解析配置文件，提取模型配置
+   * 每次调用都重新解析，不缓存
+   */
+  _parseModelConfig(configData) {
+    const result = {
+      defaultModel: null,
+      llmProvider: null
+    };
+    
+    if (!configData || typeof configData !== 'object') {
+      return result;
+    }
+    
+    // 查找默认模型
+    // 格式: "provider/model-id" 或嵌套结构
+    const defaultPrimary = configData?.agents?.defaults?.model?.primary ||
+                          configData?.defaultModel ||
+                          configData?.model;
+    
+    if (defaultPrimary) {
+      const parts = defaultPrimary.split('/');
+      if (parts.length >= 2) {
+        result.defaultModel = {
+          provider: parts[0],
+          modelId: parts.slice(1).join('/'),
           fullId: defaultPrimary
         };
       }
-
-      // 获取对应的 provider 配置
-      if (defaultModel && providers[defaultModel.provider]) {
-        const provider = providers[defaultModel.provider];
-        this.llmProvider = {
-          baseUrl: provider.baseUrl,
-          apiKey: provider.apiKey,
-          apiType: provider.api || 'openai-completions',
-          modelId: defaultModel.modelId
-        };
-      }
     }
-
-    if (modelsJson) {
-      // 从 models.json 提取（备用）
-      providers = modelsJson.providers || {};
+    
+    // 查找 provider 配置
+    const providers = configData?.models?.providers || 
+                     configData?.providers || 
+                     {};
+    
+    if (result.defaultModel && providers[result.defaultModel.provider]) {
+      const provider = providers[result.defaultModel.provider];
+      result.llmProvider = {
+        baseUrl: provider.baseUrl || provider.base_url,
+        apiKey: provider.apiKey || provider.api_key,
+        apiType: provider.api || provider.apiType || 'openai-completions',
+        modelId: result.defaultModel.modelId
+      };
     }
+    
+    return result;
+  }
 
-    this.defaultModel = defaultModel;
-    this.openClawConfig = { providers };
-
-    console.log(`[SmartSource] Default model: ${defaultModel?.fullId || 'not set'}`);
-    console.log(`[SmartSource] LLM Provider: ${this.llmProvider?.baseUrl || 'not configured'}`);
-
+  /**
+   * 每次调用都重新查找并解析配置
+   */
+  async detectOpenClawConfig() {
+    // 查找安装目录
+    const installDir = this._findOpenClawInstallDir();
+    if (!installDir) {
+      console.log('[SmartSource] OpenClaw installation not found');
+      return { hasConfig: false };
+    }
+    
+    console.log(`[SmartSource] Found OpenClaw at: ${installDir}`);
+    
+    // 查找主配置文件
+    const configFile = this._findConfigFile(installDir, 'openclaw.json') ||
+                       this._findConfigFile(installDir, 'models.json') ||
+                       this._findConfigFile(installDir, 'config.json');
+    
+    if (!configFile) {
+      console.log('[SmartSource] No config file found');
+      return { hasConfig: false, installDir };
+    }
+    
+    console.log(`[SmartSource] Reading config: ${configFile}`);
+    
+    // 读取并解析配置（每次都重新读取）
+    let configData;
+    try {
+      const content = fs.readFileSync(configFile, 'utf-8');
+      configData = JSON.parse(content);
+    } catch (e) {
+      console.log(`[SmartSource] Failed to parse config: ${e.message}`);
+      return { hasConfig: false, configFile, error: e.message };
+    }
+    
+    // 解析模型配置
+    const { defaultModel, llmProvider } = this._parseModelConfig(configData);
+    
+    if (defaultModel) {
+      console.log(`[SmartSource] Default model: ${defaultModel.fullId}`);
+    }
+    if (llmProvider) {
+      console.log(`[SmartSource] LLM endpoint: ${llmProvider.baseUrl}`);
+    }
+    
     return {
       hasConfig: true,
-      defaultModel: defaultModel?.fullId,
-      llmProvider: this.llmProvider ? {
-        baseUrl: this.llmProvider.baseUrl,
-        modelId: this.llmProvider.modelId,
-        hasApiKey: !!this.llmProvider.apiKey
+      installDir,
+      configFile,
+      defaultModel: defaultModel?.fullId || null,
+      llmProvider: llmProvider ? {
+        baseUrl: llmProvider.baseUrl,
+        modelId: llmProvider.modelId,
+        hasApiKey: !!llmProvider.apiKey
       } : null
     };
   }
 
   /**
-   * 回退配置（当找不到 OpenClaw 配置时）
-   */
-  _getFallbackConfig() {
-    return {
-      hasConfig: false,
-      defaultModel: null,
-      llmProvider: null
-    };
-  }
-
-  /**
-   * 使用默认 LLM 搜索音源
+   * 使用 LLM 搜索更多音源
+   * 每次调用都重新解析配置
    */
   async searchSourcesWithLLM() {
-    if (!this.llmProvider) {
-      console.log('[SmartSource] No LLM provider configured, using known sources');
+    // 重新获取配置
+    const config = await this.detectOpenClawConfig();
+    
+    if (!config.llmProvider || !config.llmProvider.hasApiKey) {
+      console.log('[SmartSource] No LLM provider available, using known sources');
+      return KNOWN_SOURCES;
+    }
+    
+    // 重新读取配置文件获取 API key（不保存）
+    const content = fs.readFileSync(config.configFile, 'utf-8');
+    const configData = JSON.parse(content);
+    const { llmProvider } = this._parseModelConfig(configData);
+    
+    if (!llmProvider?.apiKey) {
       return KNOWN_SOURCES;
     }
 
@@ -211,30 +258,26 @@ export class SmartSourceFinder {
 - url: API地址
 - platforms: 支持的平台数组（如["netease", "qq"]）
 - needsAuth: 是否需要认证
-- description: 简短描述
 
 只返回JSON数组，不要其他内容。`;
 
     try {
-      console.log(`[SmartSource] Calling LLM: ${this.llmProvider.modelId}`);
-      const response = await this._callLLM(prompt);
+      console.log(`[SmartSource] Calling LLM: ${llmProvider.modelId}`);
+      const response = await this._callLLM(llmProvider, prompt);
       
-      // 解析JSON
       const jsonMatch = response.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         const llmSources = JSON.parse(jsonMatch[0]);
         console.log(`[SmartSource] LLM found ${llmSources.length} sources`);
         
-        // 合并已知源和LLM找到的源（去重）
         const allSources = [...KNOWN_SOURCES];
         for (const src of llmSources) {
-          if (!allSources.find(s => s.name === src.name || s.url === src.url)) {
+          if (!allSources.find(s => s.name === src.name)) {
             allSources.push({
               name: src.name,
               searchUrl: src.url,
               platforms: src.platforms || [],
-              needsAuth: src.needsAuth || false,
-              description: src.description
+              needsAuth: src.needsAuth || false
             });
           }
         }
@@ -248,26 +291,24 @@ export class SmartSourceFinder {
   }
 
   /**
-   * 调用 LLM API（OpenAI 兼容格式）
+   * 调用 LLM API
    */
-  async _callLLM(prompt) {
+  async _callLLM(provider, prompt) {
     return new Promise((resolve, reject) => {
-      const { baseUrl, apiKey, modelId } = this.llmProvider;
-      
       let url;
       try {
-        url = new URL(baseUrl);
-        if (!url.pathname.endsWith('/chat/completions')) {
+        url = new URL(provider.baseUrl);
+        if (!url.pathname.includes('/chat')) {
           url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
         }
       } catch (e) {
-        url = new URL(baseUrl + '/chat/completions');
+        url = new URL(provider.baseUrl + '/chat/completions');
       }
 
       const lib = url.protocol === 'https:' ? https : http;
       
       const data = JSON.stringify({
-        model: modelId,
+        model: provider.modelId,
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.3,
         max_tokens: 2000
@@ -277,25 +318,22 @@ export class SmartSourceFinder {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
+          'Authorization': `Bearer ${provider.apiKey}`
         },
         timeout: 60000
       };
-
-      console.log(`[SmartSource] POST ${url.href}`);
 
       const req = lib.request(url, options, (res) => {
         let body = '';
         res.on('data', chunk => body += chunk);
         res.on('end', () => {
           if (res.statusCode !== 200) {
-            reject(new Error(`LLM API error: ${res.statusCode} - ${body}`));
+            reject(new Error(`LLM API error: ${res.statusCode}`));
             return;
           }
           try {
             const json = JSON.parse(body);
-            const content = json.choices?.[0]?.message?.content || '';
-            resolve(content);
+            resolve(json.choices?.[0]?.message?.content || '');
           } catch (e) {
             reject(e);
           }
@@ -305,7 +343,7 @@ export class SmartSourceFinder {
       req.on('error', reject);
       req.on('timeout', () => {
         req.destroy();
-        reject(new Error('LLM request timeout'));
+        reject(new Error('Timeout'));
       });
       req.write(data);
       req.end();
@@ -313,45 +351,43 @@ export class SmartSourceFinder {
   }
 
   /**
-   * 使用 LLM 评估单个音源
+   * 使用 LLM 评估音源质量
    */
-  async evaluateSourceWithLLM(source, testData) {
-    if (!this.llmProvider) {
+  async _evaluateWithLLM(source, testData) {
+    // 重新获取配置
+    const config = await this.detectOpenClawConfig();
+    
+    if (!config.llmProvider || !config.llmProvider.hasApiKey) {
+      return this._simpleEvaluation(source, testData);
+    }
+    
+    // 重新读取获取 API key
+    const content = fs.readFileSync(config.configFile, 'utf-8');
+    const configData = JSON.parse(content);
+    const { llmProvider } = this._parseModelConfig(configData);
+    
+    if (!llmProvider?.apiKey) {
       return this._simpleEvaluation(source, testData);
     }
 
-    const prompt = `请评估以下音乐API的质量，返回JSON格式的评分结果：
+    const prompt = `评估音乐API质量，返回JSON：
+音源: ${source.name}
+延迟: ${testData.latency}ms
+结果数: ${testData.resultCount}
+完整URL: ${testData.hasFullUrl ? '是' : '否'}
+已知问题: ${source.knownIssue || '无'}
 
-音源名称: ${source.name}
-API地址: ${source.searchUrl}
-支持平台: ${source.platforms?.join(', ') || '未知'}
-测试结果:
-- 搜索延迟: ${testData.latency}ms
-- 返回结果数: ${testData.resultCount}
-- 是否有完整播放URL: ${testData.hasFullUrl ? '是' : '否'}
-- 已知问题: ${source.knownIssue || '无'}
+评分维度（0-100）：
+- 完整性（是否能获取完整歌曲）
+- 响应速度
+- 稳定性
+- 结果质量
 
-请从以下维度评分（每项0-100分）：
-1. 完整性：是否能获取完整歌曲（而不是试听片段）
-2. 响应速度：API响应是否快速
-3. 稳定性：是否稳定可用
-4. 结果质量：搜索结果是否准确丰富
-
-返回JSON格式：
-{
-  "完整性": <分数>,
-  "响应速度": <分数>,
-  "稳定性": <分数>,
-  "结果质量": <分数>,
-  "总分": <综合分数>,
-  "推荐指数": <1-5星>,
-  "备注": "<简短评价>"
-}
-
-只返回JSON，不要其他内容。`;
+返回格式：
+{"完整性":X,"响应速度":X,"稳定性":X,"结果质量":X,"总分":X,"备注":"..."}`;
 
     try {
-      const response = await this._callLLM(prompt);
+      const response = await this._callLLM(llmProvider, prompt);
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const eval_ = JSON.parse(jsonMatch[0]);
@@ -360,43 +396,30 @@ API地址: ${source.searchUrl}
           success: true,
           ...testData,
           aiScore: eval_.总分,
-          aiEvaluation: eval_,
-          score: eval_.总分 + (source.priority || 0) * 10
+          score: eval_.总分 + (source.priority || 5) * 10
         };
       }
     } catch (e) {
-      console.log(`[SmartSource] LLM evaluation failed for ${source.name}:`, e.message);
+      console.log(`[SmartSource] LLM eval failed: ${e.message}`);
     }
 
     return this._simpleEvaluation(source, testData);
   }
 
   /**
-   * 简单评分（无LLM时使用）
+   * 简单评分（无LLM）
    */
   _simpleEvaluation(source, testData) {
     let score = 50;
-
-    // 完整URL 加分
     if (testData.hasFullUrl) score += 40;
     else score -= 30;
-
-    // 延迟
     if (testData.latency < 500) score += 20;
     else if (testData.latency < 1000) score += 10;
     else if (testData.latency > 3000) score -= 10;
-
-    // 结果数量
     if (testData.resultCount > 20) score += 15;
-    else if (testData.resultCount > 10) score += 10;
     else if (testData.resultCount === 0) score -= 20;
-
-    // 优先级加成
     score += (source.priority || 5) * 5;
-
-    // 已知问题扣分
     if (source.knownIssue) score -= 30;
-
     return {
       source: source.name,
       success: testData.success !== false,
@@ -412,8 +435,8 @@ API地址: ${source.searchUrl}
     const startTime = Date.now();
     
     try {
-      let url;
       const encodedSong = encodeURIComponent(testSong);
+      let url;
       
       switch (source.name) {
         case 'nuoxian':
@@ -425,28 +448,16 @@ API地址: ${source.searchUrl}
         case 'bugpk':
           url = `${source.searchUrl}?media=netease&type=search&id=${encodedSong}`;
           break;
-        case 'sunzongzheng':
-          url = `${source.searchUrl}?vendor=netease&method=searchSong&params=[{"keyword":"${testSong}"}]`;
-          break;
         default:
-          url = source.searchUrl.includes('?') 
-            ? `${source.searchUrl}&keyword=${encodedSong}`
-            : `${source.searchUrl}?keyword=${encodedSong}`;
+          url = `${source.searchUrl}?q=${encodedSong}`;
       }
 
       const data = await this._fetch(url);
       const latency = Date.now() - startTime;
-
       const resultCount = this._countResults(data);
       const hasFullUrl = this._checkFullUrl(data);
 
-      return {
-        success: true,
-        latency,
-        resultCount,
-        hasFullUrl,
-        rawData: data
-      };
+      return { success: true, latency, resultCount, hasFullUrl, rawData: data };
     } catch (e) {
       return {
         success: false,
@@ -459,46 +470,36 @@ API地址: ${source.searchUrl}
   }
 
   /**
-   * 批量测试所有音源并使用AI评分排序
+   * 批量测试并排序
    */
   async testAndRankSources(testSong = '周杰伦') {
-    // 先检测配置
-    if (!this.openClawConfig) {
-      await this.detectOpenClawConfig();
-    }
-
-    // 获取要测试的源列表
     const sources = await this.searchSourcesWithLLM();
-    console.log(`[SmartSource] Testing ${sources.length} sources with "${testSong}"...`);
+    console.log(`[SmartSource] Testing ${sources.length} sources...`);
 
-    // 测试每个源
-    const testPromises = sources.map(async (source) => {
-      const testData = await this.testSource(source, testSong);
-      return this.evaluateSourceWithLLM(source, testData);
-    });
+    const results = await Promise.all(
+      sources.map(async (source) => {
+        const testData = await this.testSource(source, testSong);
+        return this._evaluateWithLLM(source, testData);
+      })
+    );
 
-    const results = await Promise.all(testPromises);
-
-    // 按分数排序
     results.sort((a, b) => b.score - a.score);
-
-    this.testResults = results;
     return results;
   }
 
   /**
-   * 获取最佳音源
+   * 获取最佳音源（每次重新计算）
    */
-  getBestSource() {
-    if (this.testResults.length === 0) return null;
-    return this.testResults[0];
+  async getBestSource() {
+    const results = await this.testAndRankSources();
+    return results[0] || null;
   }
 
   // 辅助方法
   _countResults(data) {
     if (Array.isArray(data)) return data.length;
-    if (data.results && Array.isArray(data.results)) return data.results.length;
-    if (data.data) {
+    if (data?.results) return data.results.length;
+    if (data?.data) {
       if (Array.isArray(data.data)) return data.data.length;
       if (data.data.songs) return data.data.songs.length;
     }
@@ -506,50 +507,36 @@ API地址: ${source.searchUrl}
   }
 
   _checkFullUrl(data) {
-    const results = Array.isArray(data) ? data : (data.results || data.data || []);
+    const results = Array.isArray(data) ? data : (data?.results || data?.data || []);
     if (results.length === 0) return false;
-    const first = results[0];
-    if (first.playUrl || first.url) {
-      const url = first.playUrl || first.url;
-      if (url.includes('auth=') || url.includes('.mp3') || url.includes('.m4a')) return true;
-    }
-    return false;
+    const url = results[0]?.playUrl || results[0]?.url;
+    if (!url) return false;
+    return url.includes('auth=') || url.includes('.mp3') || url.includes('.m4a');
   }
 
   _fetch(url, maxRedirects = 5) {
     return new Promise((resolve, reject) => {
-      if (maxRedirects <= 0) {
-        reject(new Error('Too many redirects'));
-        return;
-      }
-
+      if (maxRedirects <= 0) return reject(new Error('Too many redirects'));
+      
       const parsedUrl = new URL(url);
       const lib = parsedUrl.protocol === 'https:' ? https : http;
       
-      const options = {
-        headers: {
-          'Accept': '*/*',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
+      lib.get(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
         timeout: 15000
-      };
-
-      lib.get(url, options, (res) => {
+      }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          const location = res.headers.location;
-          const newUrl = location.startsWith('http') ? location : new URL(location, parsedUrl.origin).href;
-          resolve(this._fetch(newUrl, maxRedirects - 1));
-          return;
+          const newUrl = res.headers.location.startsWith('http') 
+            ? res.headers.location 
+            : new URL(res.headers.location, parsedUrl.origin).href;
+          return resolve(this._fetch(newUrl, maxRedirects - 1));
         }
-
+        
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            resolve(data);
-          }
+          try { resolve(JSON.parse(data)); }
+          catch (e) { resolve(data); }
         });
       }).on('error', reject);
     });
