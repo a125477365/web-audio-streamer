@@ -18,6 +18,7 @@ import { OnlineMusicApi } from './online-music.js';
 import { RadioPlayer } from './radio.js';
 import { MusicDownloader } from './downloader.js';
 import { RecommendationEngine } from './recommendation.js';
+import { SmartSourceFinder } from './smart-source.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +51,7 @@ const onlineApi = new OnlineMusicApi(config);
 const radioPlayer = new RadioPlayer(config);
 const downloader = new MusicDownloader(config);
 const recommender = new RecommendationEngine(config);
+const smartSourceFinder = new SmartSourceFinder(config);
 
 // ==================== 本地音乐 API ====================
 
@@ -402,6 +404,83 @@ app.get('/api/radio/play', async (req, res) => {
  res.status(500).json({ success: false, error: error.message });
  }
 });
+
+// ==================== 智能音源搜索 ====================
+/**
+ * 自动检测并测试音源
+ */
+app.get('/api/smart-source/test', async (req, res) => {
+  try {
+    const { song = '周杰伦' } = req.query;
+    const results = await smartSourceFinder.testAndRankSources(song);
+    res.json({ success: true, results });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * 获取最佳音源
+ */
+app.get('/api/smart-source/best', (req, res) => {
+  const best = smartSourceFinder.getBestSource();
+  res.json({ success: true, bestSource: best });
+});
+
+/**
+ * 使用最佳音源搜索
+ */
+app.get('/api/smart-source/search', async (req, res) => {
+  try {
+    const { q, type = 'song' } = req.query;
+    if (!q) {
+      return res.status(400).json({ success: false, error: 'Missing search query' });
+    }
+
+    // 先测试音源（如果还没有测试过）
+    if (smartSourceFinder.testResults.length === 0) {
+      await smartSourceFinder.testAndRankSources(q);
+    }
+
+    const best = smartSourceFinder.getBestSource();
+    if (!best) {
+      return res.status(500).json({ success: false, error: 'No available source' });
+    }
+
+    // 使用最佳音源搜索
+    const results = await onlineApi.search(q, type);
+    
+    // 附加音源信息
+    res.json({ 
+      success: true, 
+      source: best.source,
+      sourceScore: best.score,
+      results 
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * 手动检测OpenClaw配置
+ */
+app.get('/api/smart-source/config', async (req, res) => {
+  try {
+    const config = await smartSourceFinder.detectOpenClawConfig();
+    res.json({ 
+      success: true, 
+      config: {
+        hasModels: !!config.models,
+        providerCount: config.models?.providers ? Object.keys(config.models.providers).length : 0,
+        apiKeysFound: Object.keys(config.apiKeys || {})
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 // ==================== 控制接口 ====================
 
