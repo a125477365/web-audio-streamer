@@ -117,7 +117,15 @@ export class OnlineMusicApi {
         };
       });
 
-      return songs;
+			// 过滤试听/短片段（尽量不让搜索结果出现 45 秒试听）
+			// 规则：如果有 duration 且明显 < 90 秒，则认为是试听
+			const filtered = songs.filter((s) => {
+				if (!s.duration) return true;
+				const sec = s.duration > 10000 ? s.duration / 1000 : s.duration;
+				return !(sec > 0 && sec < 90);
+			});
+
+			return filtered;
     } catch (error) {
       return {
         success: false,

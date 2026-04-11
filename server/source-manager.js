@@ -13,6 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { execSync } from 'child_process';
 
 // 配置文件路径
 // 需要长期保存：
@@ -332,6 +333,8 @@ export class SourceManager {
 		score += (source.priority || 5) * 5;
 		
 		if (source.knownIssue) score -= 30;
+		// 如果探测到试听，强力降权（尽量让试听源不进入 Top5）
+		if (testData.isPreview) score -= 80;
 
 		return {
 			source: source.name,
@@ -368,13 +371,20 @@ export class SourceManager {
 			const data = await this._fetch(url);
 			const latency = Date.now() - startTime;
 			const resultCount = this._countResults(data);
+			const firstUrl = this._extractFirstPlayUrl(data);
 			const hasFullUrl = this._checkFullUrl(data);
+			// 试听检测：探测第一条结果的时长（秒）
+			const durationSec = firstUrl ? this._probeDuration(firstUrl) : null;
+			const isPreview = typeof durationSec === 'number' && durationSec > 0 && durationSec < 90;
 
 			return {
 				success: true,
 				latency,
 				resultCount,
 				hasFullUrl,
+				firstUrl: firstUrl || null,
+				durationSec,
+				isPreview,
 				rawData: data
 			};
 		} catch (e) {
@@ -383,9 +393,35 @@ export class SourceManager {
 				latency: Date.now() - startTime,
 				resultCount: 0,
 				hasFullUrl: false,
+				firstUrl: null,
+				durationSec: null,
+				isPreview: false,
 				error: e.message
 			};
 		}
+	}
+
+	_extractFirstPlayUrl(data) {
+		try {
+			const results = Array.isArray(data) ? data : (data?.results || data?.data || []);
+			if (!results || results.length === 0) return null;
+			const first = results[0];
+			return first?.playUrl || first?.url || null;
+		} catch {
+			return null;
+		}
+	}
+
+	_probeDuration(inputUrl) {
+		try {
+			const cmd = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputUrl}"`;
+			const out = execSync(cmd, { timeout: 8000, encoding: 'utf-8', shell: true }).trim();
+			const v = parseFloat(out);
+			if (Number.isFinite(v) && v > 0) return v;
+		} catch (e) {
+			// ignore
+		}
+		return null;
 	}
 
 	/**
