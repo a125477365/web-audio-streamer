@@ -19,6 +19,7 @@ import { RadioPlayer } from "./radio.js";
 import { MusicDownloader } from "./downloader.js";
 import { RecommendationEngine } from "./recommendation.js";
 import { SmartSourceFinder } from "./smart-source.js";
+import { SourceManager } from "./source-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +54,7 @@ const radioPlayer = new RadioPlayer(config);
 const downloader = new MusicDownloader(config);
 const recommender = new RecommendationEngine(config);
 const smartSourceFinder = new SmartSourceFinder(config);
+const sourceManager = new SourceManager();
 
 // ==================== 本地音乐 API ====================
 
@@ -470,7 +472,98 @@ app.get("/api/radio/play", async (req, res) => {
   }
 });
 
-// ==================== 智能音源搜索 ====================
+// ==================== 音源管理 ====================
+
+/**
+ * 智能测试所有音源，返回前5个最佳（使用AI评分）
+ * POST /api/source/test
+ * Body: { testSong: "周杰伦" }
+ */
+app.post("/api/source/test", async (req, res) => {
+	try {
+		const { testSong = "周杰伦" } = req.body;
+		console.log(`[Source] Testing sources with "${testSong}"...`);
+		const results = await sourceManager.testAndRankSources(testSong);
+		res.json({ success: true, results });
+	} catch (error) {
+		console.error("[Source] Test failed:", error.message);
+		res.status(500).json({ success: false, error: error.message });
+	}
+});
+
+/**
+ * 保存用户选择的音源
+ * POST /api/source/select
+ * Body: { source: {...} }
+ */
+app.post("/api/source/select", async (req, res) => {
+	try {
+		const { source } = req.body;
+		if (!source || !source.name) {
+			return res.status(400).json({ success: false, error: "Missing source info" });
+		}
+		const saved = sourceManager.saveSource(source);
+		if (saved) {
+			res.json({ success: true, message: `已选择音源: ${source.name}` });
+		} else {
+			res.status(500).json({ success: false, error: "Failed to save source" });
+		}
+	} catch (error) {
+		res.status(500).json({ success: false, error: error.message });
+	}
+});
+
+/**
+ * 获取当前使用的音源
+ * GET /api/source/current
+ */
+app.get("/api/source/current", (req, res) => {
+	try {
+		const source = sourceManager.getCurrentSource();
+		res.json({ success: true, source });
+	} catch (error) {
+		res.status(500).json({ success: false, error: error.message });
+	}
+});
+
+/**
+ * 使用已保存的音源进行搜索
+ * GET /api/source/search?q=xxx
+ */
+app.get("/api/source/search", async (req, res) => {
+	try {
+		const { q } = req.query;
+		if (!q) {
+			return res.status(400).json({ success: false, error: "Missing search query" });
+		}
+
+		// 获取当前音源
+		let currentSource = sourceManager.getCurrentSource();
+		
+		// 如果没有保存的音源，先测试
+		if (!currentSource) {
+			console.log("[Source] No saved source, testing...");
+			const results = await sourceManager.testAndRankSources(q);
+			if (results.length > 0) {
+				currentSource = results[0].sourceInfo;
+				sourceManager.saveSource(currentSource);
+			}
+		}
+
+		// 使用当前音源搜索
+		const results = await onlineApi.search(q);
+		
+		res.json({ 
+			success: true, 
+			source: currentSource,
+			results 
+		});
+	} catch (error) {
+		res.json({ success: false, error: error.message });
+	}
+});
+
+// ==================== 旧的智能音源搜索（保留兼容） ====================
 /**
  * 自动检测并测试音源
  */
