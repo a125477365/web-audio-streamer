@@ -1,11 +1,8 @@
 /**
- * 音源管理器 v4.2
- * 
- * 流程：
- * 1. 尝试调用 Agent 搜索音源
- * 2. 如果 Agent 失败，使用预定义的已知可用源作为后备
- * 3. 后端用 ffprobe 测试每条播放链接，过滤试听源
- * 4. 返回最多6个最优选
+ * 音源管理器 v5
+ *
+ * 核心原则：所有音源由 OpenClaw Agent 搜索、测试、筛选
+ * 代码不写死任何源，不使用后备源
  */
 
 import fs from "fs";
@@ -18,469 +15,351 @@ import { spawn, execSync } from "child_process";
 const CONFIG_DIR = path.join(os.homedir(), ".openclaw", "web-audio-streamer");
 const SOURCE_CONFIG_FILE = path.join(CONFIG_DIR, "source-config.json");
 
-// 预定义的已知音乐源（作为 Agent 失败时的后备）
-const FALLBACK_SOURCES = [
-	{
-		name: "落雪音乐 API",
-		searchUrl: "https://api.nxvav.cn/api/music/",
-		description: "落雪音乐API，多平台支持",
-	},
-	{
-		name: "Injahow Meting",
-		searchUrl: "https://api.injahow.cn/meting/",
-		description: "Meting API",
-	},
-	{
-		name: "BugPK Music",
-		searchUrl: "https://api.bugpk.com/api/music",
-		description: "BugPK音乐API",
-	},
-];
-
 export class SourceManager {
-	constructor() {
-		this.config = null;
-		this._ensureConfigDir();
-	}
+  constructor() {
+    this.config = null;
+    this._ensureConfigDir();
+  }
 
-	_ensureConfigDir() {
-		if (!fs.existsSync(CONFIG_DIR)) {
-			fs.mkdirSync(CONFIG_DIR, { recursive: true });
-		}
-	}
+  _ensureConfigDir() {
+    if (!fs.existsSync(CONFIG_DIR)) {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    }
+  }
 
-	loadConfig() {
-		try {
-			if (fs.existsSync(SOURCE_CONFIG_FILE)) {
-				this.config = JSON.parse(
-					fs.readFileSync(SOURCE_CONFIG_FILE, "utf-8"),
-				);
-				return this.config;
-			}
-		} catch (e) {
-			console.error("[SourceManager] Failed to load config:", e.message);
-		}
-		return null;
-	}
+  loadConfig() {
+    try {
+      if (fs.existsSync(SOURCE_CONFIG_FILE)) {
+        this.config = JSON.parse(fs.readFileSync(SOURCE_CONFIG_FILE, "utf-8"));
+        return this.config;
+      }
+    } catch (e) {
+      console.error("[SourceManager] Failed to load config:", e.message);
+    }
+    return null;
+  }
 
-	saveConfig(data) {
-		try {
-			fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(data, null, 2));
-			this.config = data;
-			console.log("[SourceManager] Config saved");
-			return true;
-		} catch (e) {
-			console.error("[SourceManager] Failed to save config:", e.message);
-			return false;
-		}
-	}
+  saveConfig(data) {
+    try {
+      fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(data, null, 2));
+      this.config = data;
+      console.log("[SourceManager] Config saved");
+      return true;
+    } catch (e) {
+      console.error("[SourceManager] Failed to save config:", e.message);
+      return false;
+    }
+  }
 
-	getCurrentSource() {
-		if (!this.config) this.loadConfig();
-		return this.config?.selectedSource || null;
-	}
+  /** 是否已有可用音源 */
+  hasAvailableSource() {
+    if (!this.config) this.loadConfig();
+    return !!this.config?.selectedSource?.searchUrl;
+  }
 
-	getCandidateSources() {
-		if (!this.config) this.loadConfig();
-		return this.config?.candidateSources || [];
-	}
+  /** 获取当前选中的音源 */
+  getCurrentSource() {
+    if (!this.config) this.loadConfig();
+    return this.config?.selectedSource || null;
+  }
 
-	saveSelectedSource(source) {
-		if (!this.config) this.loadConfig();
-		this.config = this.config || {};
-		this.config.selectedSource = source;
-		this.config.selectedAt = new Date().toISOString();
-		this.saveConfig(this.config);
-		console.log("[SourceManager] Saved selected source:", source.name);
-	}
+  /** 获取已保存的候选列表（最多6个） */
+  getCandidates() {
+    if (!this.config) this.loadConfig();
+    return this.config?.candidates || [];
+  }
 
-	hasAvailableSource() {
-		const source = this.getCurrentSource();
-		return source && source.searchUrl;
-	}
+  /** 用户从候选中选择一个源 */
+  selectSource(source) {
+    this.config = this.config || {};
+    this.config.selectedSource = source;
+    this.config.selectedAt = new Date().toISOString();
+    this.saveConfig(this.config);
+    console.log("[SourceManager] User selected:", source.name);
+  }
 
-	/**
-	 * 智能获取音源 - 完整流程
-	 */
-	async fetchAndTestSources(testSong = "周杰伦") {
-		console.log("[SourceManager] === Starting smart source discovery ===");
+  /**
+   * 智能获取音源 - 调用 OpenClaw Agent 完成搜索+测试+筛选
+   * 返回最多6个非试听的可用源
+   */
+  async fetchSources(testSong = "周杰伦") {
+    console.log("[SourceManager] === 开始智能获取音源（Agent 全流程）===");
 
-		// 1. 尝试调用 Agent 搜索
-		let discovered = [];
-		try {
-			discovered = await this._discoverViaAgent(testSong);
-		} catch (e) {
-			console.log("[SourceManager] Agent discovery failed:", e.message);
-		}
+    const agentOutput = await this._callAgent(testSong);
+    const sources = this._parseAgentOutput(agentOutput);
 
-		// 2. 如果 Agent 没有返回有效结果，使用后备源
-		if (discovered.length === 0) {
-			console.log(
-				"[SourceManager] Agent returned no results, using fallback sources",
-			);
-			discovered = FALLBACK_SOURCES.map((s) => ({
-				...s,
-				fromFallback: true,
-			}));
-		}
+    if (!sources || sources.length === 0) {
+      // Agent 没找到源
+      const errorReason = this._extractError(agentOutput);
+      throw new Error(errorReason || "Agent 未找到任何可用音源");
+    }
 
-		// 3. 测试每个源
-		console.log(
-			"[SourceManager] Testing",
-			discovered.length,
-			"sources...",
-		);
-		const testedResults = [];
+    // 验证每个源都有有效的 searchUrl（排除 GitHub 等非 API URL）
+    const validSources = sources.filter(
+      (s) =>
+        s &&
+        s.searchUrl &&
+        s.searchUrl.startsWith("http") &&
+        !s.searchUrl.includes("github.com"),
+    );
 
-		for (const source of discovered) {
-			const result = await this._testSource(source, testSong);
-			console.log(
-				"[SourceManager] Test result:",
-				result.name,
-				"- success:",
-				result.success,
-				"- resultCount:",
-				result.resultCount,
-				"- maxDuration:",
-				result.maxDuration,
-				"- hasFullSong:",
-				result.hasFullSong,
-			);
-			testedResults.push(result);
-		}
+    if (validSources.length === 0) {
+      throw new Error(
+        "Agent 未找到可用的音乐搜索API（可能搜索受限，请稍后重试）",
+      );
+    }
 
-		// 4. 过滤：必须成功 + 非试听 + 有结果
-		const validSources = testedResults.filter(
-			(r) =>
-				r.success &&
-				r.hasFullSong === true &&
-				r.resultCount > 0,
-		);
+    // 限制最多6个
+    const top6 = validSources.slice(0, 6);
 
-		console.log(
-			"[SourceManager] Valid sources after testing:",
-			validSources.length,
-			"/",
-			testedResults.length,
-		);
+    // 永久保存候选列表
+    this.config = this.config || {};
+    this.config.candidates = top6;
+    this.config.lastFetchAt = new Date().toISOString();
+    this.config.fetchTestSong = testSong;
+    this.config.version = 5;
+    this.saveConfig(this.config);
 
-		// 5. 排序
-		validSources.sort((a, b) => {
-			if (a.maxDuration !== b.maxDuration) {
-				return b.maxDuration - a.maxDuration;
-			}
-			return a.latency - b.latency;
-		});
+    // 自动选中第一个
+    if (!this.config.selectedSource || !this.config.selectedSource.searchUrl) {
+      this.selectSource(top6[0]);
+    }
 
-		// 6. 返回前6个
-		const top6 = validSources.slice(0, 6);
+    console.log(
+      "[SourceManager] === Agent 返回",
+      top6.length,
+      "个源:",
+      top6.map((s) => s.name),
+    );
+    return top6;
+  }
 
-		// 7. 保存候选列表
-		if (top6.length > 0) {
-			this.config = this.config || {};
-			this.config.candidateSources = top6;
-			this.config.lastFetchAt = new Date().toISOString();
-			this.config.version = 4;
-			this.saveConfig(this.config);
-		}
+  /**
+   * 调用 OpenClaw Agent
+   * Agent 负责搜索、测试、筛选试听源
+   */
+  _callAgent(testSong) {
+    return new Promise((resolve) => {
+      console.log("[SourceManager] Calling OpenClaw Agent...");
 
-		console.log(
-			"[SourceManager] === Returning",
-			top6.length,
-			"sources:",
-			top6.map((s) => s.name),
-		);
-		return top6;
-	}
+      const prompt = [
+        `你现在是一个音乐API搜索测试工具。请完成以下完整流程：`,
+        ``,
+        `第一步：搜索`,
+        `使用 web_search 搜索："落雪音乐API 免费搜索接口"`,
+        `如果 web_search 不可用，使用 web_fetch 访问 GitHub 搜索结果页面`,
+        ``,
+        `第二步：找到实际的音乐搜索API地址`,
+        `注意：我需要的是可以直接 HTTP GET 请求的 API 地址，例如：`,
+        `- https://api.example.com/music?name=歌名`,
+        `- https://example.com/api/search?keyword=歌名`,
+        `不是 GitHub 仓库链接，不是文档链接`,
+        ``,
+        `第三步：测试找到的 API（用 exec 工具）`,
+        `对每个找到的 API，执行：curl -s --max-time 10 "API_URL?server=netease&type=search&id=${testSong}"`,
+        `如果返回了 JSON 且包含歌曲列表，说明 API 可用`,
+        ``,
+        `第四步：从返回结果中提取播放链接，测试时长`,
+        `用 exec 工具执行：ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "PLAY_URL"`,
+        `如果时长 >= 90秒，说明不是试听源`,
+        ``,
+        `第五步：输出`,
+        `只输出有效的、非试听的 API。格式必须是：`,
+        `>>>MUSIC_SOURCES_START<<<`,
+        `[{"name":"API名称","searchUrl":"完整的可直接HTTP请求的搜索API地址","description":"简短描述","maxDuration":最长歌曲秒数,"resultCount":搜索结果条数}]`,
+        `>>>MUSIC_SOURCES_END<<<`,
+        ``,
+        `如果找不到可用源，输出：>>>MUSIC_SOURCES_START<<<\n[]\n>>>MUSIC_SOURCES_END<<<`,
+      ].join("\n");
 
-	/**
-	 * 调用 Agent 搜索音源
-	 */
-	async _discoverViaAgent(testSong) {
-		return new Promise((resolve) => {
-			console.log(
-				"[SourceManager] Calling OpenClaw Agent to search for music APIs...",
-			);
+      const sessionId = "music-source-fetch-" + Date.now();
 
-			const prompt = `请使用 web_search 工具搜索免费音乐API。
+      // 不使用 --json，让 stdout 直接是 Agent 的文本回复
+      const proc = spawn(
+        "openclaw",
+        ["agent", "--session-id", sessionId, "--timeout", "300", "-m", prompt],
+        { cwd: process.cwd(), env: process.env },
+      );
 
-搜索关键词：落雪音乐 API
+      let stdout = "";
+      let stderr = "";
 
-返回格式（JSON数组）：
-[{"name":"API名称","searchUrl":"https://xxx/api","description":"描述"}]
+      proc.stdout.on("data", (d) => {
+        stdout += d;
+      });
+      proc.stderr.on("data", (d) => {
+        stderr += d;
+      });
 
-只返回包含 https:// 或 http:// 开头的 URL 的 JSON 数组。`;
+      proc.on("close", (code) => {
+        console.log("[SourceManager] Agent exit code:", code);
+        if (stderr)
+          console.log("[SourceManager] Agent stderr:", stderr.slice(0, 500));
+        console.log("[SourceManager] Agent output length:", stdout.length);
+        console.log("[SourceManager] Agent output:", stdout.slice(0, 1000));
+        resolve({ code, stdout, stderr });
+      });
 
-			const sessionId = "source-search-" + Date.now();
+      proc.on("error", (e) => {
+        console.log("[SourceManager] Agent spawn error:", e.message);
+        resolve({ code: -1, stdout: "", stderr: e.message });
+      });
 
-			const proc = spawn(
-				"openclaw",
-				[
-					"agent",
-					"--session-id",
-					sessionId,
-					"--timeout",
-					"120",
-					"--json",
-					"-m",
-					prompt,
-				],
-				{
-					cwd: process.cwd(),
-					env: process.env,
-				},
-			);
+      // 超时保护 5分钟
+      setTimeout(() => {
+        try {
+          proc.kill();
+        } catch {}
+        resolve({ code: -2, stdout: "", stderr: "Agent timeout (5min)" });
+      }, 310000);
+    });
+  }
 
-			let stdout = "";
-			let stderr = "";
+  /**
+   * 解析 Agent 输出，提取 JSON 音源列表
+   */
+  _parseAgentOutput(output) {
+    if (!output?.stdout) return null;
 
-			proc.stdout.on("data", (d) => {
-				stdout += d;
-			});
-			proc.stderr.on("data", (d) => {
-				stderr += d;
-			});
+    const text = output.stdout;
 
-			proc.on("close", (code) => {
-				console.log("[SourceManager] Agent exit code:", code);
+    // 方法1: 使用标记提取（最可靠）
+    const markerMatch = text.match(
+      />MUSIC_SOURCES_START<<<\s*([\s\S]*?)\s*>MUSIC_SOURCES_END<</,
+    );
+    if (markerMatch) {
+      let inner = markerMatch[1].trim();
+      // 去掉 markdown 代码块包裹
+      inner = inner
+        .replace(/^```(?:json)?\s*\n?/i, "")
+        .replace(/\n?```\s*$/i, "")
+        .trim();
+      try {
+        const parsed = JSON.parse(inner);
+        // 可能是数组或对象包含 sources 数组
+        let arr = Array.isArray(parsed)
+          ? parsed
+          : parsed.sources || parsed.data || null;
+        if (Array.isArray(arr) && arr.length > 0) {
+          console.log(
+            "[SourceManager] Parsed from markers:",
+            arr.length,
+            "sources",
+          );
+          return arr;
+        }
+        if (arr && arr.length === 0) {
+          console.log(
+            "[SourceManager] Agent returned empty array from markers",
+          );
+          return [];
+        }
+      } catch (e) {
+        console.log(
+          "[SourceManager] Marker found but JSON parse failed:",
+          e.message,
+          "content:",
+          inner.slice(0, 200),
+        );
+      }
+    }
 
-				try {
-					// 找包含 http URL 的 JSON 数组
-					const jsonMatches = stdout.match(/\[[\s\S]*?\]/g);
-					if (jsonMatches) {
-						for (let i = jsonMatches.length - 1; i >= 0; i--) {
-							try {
-								const parsed = JSON.parse(jsonMatches[i]);
-								if (Array.isArray(parsed) && parsed.length > 0) {
-									const hasValidUrl = parsed.some(
-										(item) =>
-											item &&
-											typeof item.searchUrl === "string" &&
-											(item.searchUrl.startsWith("http://") ||
-												item.searchUrl.startsWith("https://")),
-									);
-									if (hasValidUrl) {
-										const filtered = parsed.filter(
-											(s) =>
-												s &&
-												s.searchUrl &&
-												(s.searchUrl.startsWith("http://") ||
-													s.searchUrl.startsWith("https://")),
-										);
-										if (filtered.length > 0) {
-											console.log(
-												"[SourceManager] Agent found",
-												filtered.length,
-												"valid sources",
-											);
-											return resolve(filtered);
-										}
-									}
-								}
-							} catch (e) {}
-						}
-					}
+    // 方法2: 找包含 http URL 的 JSON 数组（从后往前找最大的）
+    const jsonMatches = text.match(/\[[\s\S]*?\]/g);
+    if (jsonMatches) {
+      for (let i = jsonMatches.length - 1; i >= 0; i--) {
+        try {
+          const parsed = JSON.parse(jsonMatches[i]);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const hasValid = parsed.some((item) =>
+              item?.searchUrl?.startsWith("http"),
+            );
+            if (hasValid) {
+              console.log(
+                "[SourceManager] Parsed from JSON array:",
+                parsed.length,
+                "sources",
+              );
+              return parsed;
+            }
+          }
+        } catch {}
+      }
+    }
 
-					// 方法2: 找 http URL
-					const urlPattern = /"searchUrl"\s*:\s*"(https?:\/\/[^"]+)"/g;
-					const results = [];
-					let match;
-					while ((match = urlPattern.exec(stdout)) !== null) {
-						results.push({
-							name: "Discovered API",
-							searchUrl: match[1],
-							description: "Agent discovered",
-						});
-					}
-					if (results.length > 0) {
-						return resolve(results);
-					}
+    // 方法3: 正则提取所有 http URL（任何包含 searchUrl 或 url 字段的）
+    const urls = [];
+    const urlPattern = /"(?:searchUrl|url)"\s*:\s*"(https?:\/\/[^"]+)"/g;
+    let match;
+    const seen = new Set();
+    while ((match = urlPattern.exec(text)) !== null) {
+      if (!seen.has(match[1]) && !match[1].includes("github.com")) {
+        seen.add(match[1]);
+        urls.push({
+          name: "Discovered API",
+          searchUrl: match[1],
+          description: "Agent discovered",
+        });
+      }
+    }
+    if (urls.length > 0) {
+      console.log("[SourceManager] Parsed from regex:", urls.length, "sources");
+      return urls;
+    }
 
-					console.log("[SourceManager] Agent returned no valid URLs");
-					resolve([]);
-				} catch (e) {
-					console.log("[SourceManager] Parse error:", e.message);
-					resolve([]);
-				}
-			});
+    console.log(
+      "[SourceManager] Could not parse any sources from agent output",
+    );
+    return null;
+  }
 
-			proc.on("error", (e) => {
-				console.log("[SourceManager] Spawn error:", e.message);
-				resolve([]);
-			});
+  /**
+   * 从 Agent 输出中提取错误信息
+   */
+  _extractError(output) {
+    if (!output) return null;
+    if (output.code === -1)
+      return "无法启动 OpenClaw Agent: " + (output.stderr || "");
+    if (output.code === -2) return "Agent 执行超时（5分钟）";
+    if (output.code !== 0)
+      return (
+        `Agent 退出码: ${output.code}` +
+        (output.stderr ? " - " + output.stderr.slice(0, 200) : "")
+      );
+    return null;
+  }
 
-			setTimeout(() => {
-				try {
-					proc.kill();
-				} catch (e) {}
-				resolve([]);
-			}, 130000);
-		});
-	}
+  /**
+   * 批量探测搜索结果的 duration（标记试听）
+   */
+  probeSearchResults(items, probeLimit = 10) {
+    const results = [];
+    const toProbe = items.slice(0, probeLimit);
+    for (const item of toProbe) {
+      const url = item?.playUrl || item?.url;
+      if (!url) {
+        results.push({ ...item, durationSec: null, isPreview: null });
+        continue;
+      }
+      const dur = this._probeDuration(url);
+      const isPreview = typeof dur === "number" && dur > 0 && dur < 90;
+      results.push({ ...item, durationSec: dur, isPreview });
+    }
+    for (const item of items.slice(probeLimit)) {
+      results.push({ ...item, durationSec: null, isPreview: null });
+    }
+    return results;
+  }
 
-	/**
-	 * 测试单个音源
-	 */
-	async _testSource(source, testSong) {
-		const startTime = Date.now();
-
-		try {
-			if (!source.searchUrl || typeof source.searchUrl !== "string") {
-				return {
-					...source,
-					success: false,
-					error: "Invalid or missing searchUrl",
-					resultCount: 0,
-				};
-			}
-
-			let searchUrl = source.searchUrl;
-			if (!searchUrl.includes("?")) {
-				searchUrl += `?server=netease&type=search&id=${encodeURIComponent(testSong)}`;
-			}
-
-			console.log(`[SourceManager] Testing: ${source.name} -> ${searchUrl}`);
-
-			const data = await this._fetch(searchUrl);
-			const latency = Date.now() - startTime;
-
-			const items = this._parseResults(data);
-			const resultCount = items.length;
-
-			if (resultCount === 0) {
-				return {
-					...source,
-					success: false,
-					error: "No results",
-					latency,
-					resultCount: 0,
-				};
-			}
-
-			// 抽样测试前3条
-			const sampleItems = items.slice(0, 3);
-			let maxDuration = 0;
-
-			for (const item of sampleItems) {
-				const playUrl = item.playUrl || item.url;
-				if (!playUrl) continue;
-				const duration = this._probeDuration(playUrl);
-				if (duration && duration > maxDuration) {
-					maxDuration = duration;
-				}
-			}
-
-			const hasFullSong = maxDuration >= 90;
-
-			return {
-				...source,
-				success: true,
-				latency,
-				resultCount,
-				maxDuration,
-				hasFullSong,
-				isPreview: maxDuration > 0 && maxDuration < 90,
-				sampleDuration: maxDuration,
-				testedAt: new Date().toISOString(),
-			};
-		} catch (e) {
-			return {
-				...source,
-				success: false,
-				error: e.message,
-				latency: Date.now() - startTime,
-				resultCount: 0,
-			};
-		}
-	}
-
-	/**
-	 * 批量探测搜索结果的 duration
-	 */
-	probeSearchResults(items, probeLimit = 10) {
-		const results = [];
-		const toProbe = items.slice(0, probeLimit);
-
-		for (const item of toProbe) {
-			const url = item?.playUrl || item?.url;
-			if (!url) {
-				results.push({ ...item, durationSec: null, isPreview: null });
-				continue;
-			}
-			const dur = this._probeDuration(url);
-			const isPreview = typeof dur === "number" && dur > 0 && dur < 90;
-			results.push({ ...item, durationSec: dur, isPreview });
-		}
-
-		for (const item of items.slice(probeLimit)) {
-			results.push({ ...item, durationSec: null, isPreview: null });
-		}
-
-		return results;
-	}
-
-	_fetch(url) {
-		return new Promise((resolve, reject) => {
-			const parsed = new URL(url);
-			const lib = parsed.protocol === "https:" ? https : http;
-
-			const req = lib.get(
-				url,
-				{
-					headers: { "User-Agent": "Mozilla/5.0" },
-					timeout: 15000,
-				},
-				(res) => {
-					if (
-						res.statusCode >= 300 &&
-						res.statusCode < 400 &&
-						res.headers.location
-					) {
-						const newUrl = res.headers.location.startsWith("http")
-							? res.headers.location
-							: new URL(res.headers.location, parsed.origin).href;
-						return this._fetch(newUrl).then(resolve).catch(reject);
-					}
-
-					let data = "";
-					res.on("data", (c) => (data += c));
-					res.on("end", () => {
-						try {
-							resolve(JSON.parse(data));
-						} catch {
-							resolve(data);
-						}
-					});
-				},
-			);
-
-			req.on("error", reject);
-			req.on("timeout", () => {
-				req.destroy();
-				reject(new Error("Timeout"));
-			});
-		});
-	}
-
-	_parseResults(data) {
-		if (Array.isArray(data)) return data;
-		if (data?.results) return data.results;
-		if (data?.data) {
-			if (Array.isArray(data.data)) return data.data;
-			if (data.data.songs) return data.data.songs;
-		}
-		return [];
-	}
-
-	_probeDuration(url) {
-		try {
-			const out = execSync(
-				`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${url}"`,
-				{ timeout: 8000, encoding: "utf-8", shell: true },
-			).trim();
-			const v = parseFloat(out);
-			if (Number.isFinite(v) && v > 0) return v;
-		} catch {}
-		return null;
-	}
+  _probeDuration(url) {
+    try {
+      const out = execSync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${url}"`,
+        { timeout: 8000, encoding: "utf-8", shell: true },
+      ).trim();
+      const v = parseFloat(out);
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch {}
+    return null;
+  }
 }

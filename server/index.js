@@ -488,16 +488,14 @@ app.get("/api/radio/play", async (req, res) => {
 app.post("/api/source/fetch", async (req, res) => {
   try {
     const { testSong = "周杰伦" } = req.body;
-    console.log('[Source] Smart fetching sources with "' + testSong + '"...');
+    console.log('[Source] Agent fetching sources with "' + testSong + '"...');
     
-    const results = await sourceManager.fetchAndTestSources(testSong);
+    const results = await sourceManager.fetchSources(testSong);
     
     res.json({ 
       success: true, 
       results,
-      message: results.length > 0 
-        ? '发现 ' + results.length + ' 个可用音源' 
-        : '未找到可用音源，请重试'
+      message: '发现 ' + results.length + ' 个可用音源'
     });
   } catch (error) {
     console.error("[Source] Fetch failed:", error.message);
@@ -511,7 +509,7 @@ app.post("/api/source/fetch", async (req, res) => {
  */
 app.get("/api/source/candidates", (req, res) => {
   try {
-    const candidates = sourceManager.getCandidateSources();
+    const candidates = sourceManager.getCandidates();
     res.json({ success: true, results: candidates });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -529,7 +527,7 @@ app.post("/api/source/select", async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing source info" });
     }
     
-    sourceManager.saveSelectedSource(source);
+    sourceManager.selectSource(source);
     onlineApi.setSource(source);
     
     res.json({ 
@@ -563,7 +561,7 @@ app.get("/api/source/status", (req, res) => {
   try {
     const hasSource = sourceManager.hasAvailableSource();
     const current = sourceManager.getCurrentSource();
-    const candidates = sourceManager.getCandidateSources();
+    const candidates = sourceManager.getCandidates();
     
     res.json({ 
       success: true, 
@@ -614,70 +612,6 @@ app.get("/api/source/search", async (req, res) => {
   }
 });
 
-// ==================== 旧的智能音源搜索（保留兼容） ====================
-/**
- * 自动检测并测试音源
- */
-app.get("/api/smart-source/test", async (req, res) => {
-  try {
-    const { song = "周杰伦" } = req.query;
-    const results = await smartSourceFinder.testAndRankSources(song);
-    res.json({ success: true, results });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-/**
- * 获取最佳音源
- */
-app.get("/api/smart-source/best", (req, res) => {
-  const best = smartSourceFinder.getBestSource();
-  res.json({ success: true, bestSource: best });
-});
-
-/**
- * 使用最佳音源搜索
- */
-app.get("/api/smart-source/search", async (req, res) => {
-  try {
-    const { q, type = "song" } = req.query;
-    if (!q) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing search query" });
-    }
-
-    // 先测试音源（如果还没有测试过）
-    if (smartSourceFinder.testResults.length === 0) {
-      await smartSourceFinder.testAndRankSources(q);
-    }
-
-    const best = smartSourceFinder.getBestSource();
-    if (!best) {
-      return res
-        .status(500)
-        .json({ success: false, error: "No available source" });
-    }
-
-    // 使用最佳音源搜索
-    const results = await onlineApi.search(q, type);
-
-    // 附加音源信息
-    res.json({
-      success: true,
-      source: best.source,
-      sourceScore: best.score,
-      results,
-    });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
-});
-
-/**
- * 手动检测OpenClaw配置
- */
 app.get("/api/smart-source/config", async (req, res) => {
   try {
     const config = await smartSourceFinder.detectOpenClawConfig();

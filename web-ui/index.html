@@ -30,6 +30,9 @@
     .btn { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
     .btn-primary { background: #7c3aed; color: white; }
     .btn-primary:hover { background: #6d28d9; }
+    .btn-accent { background: linear-gradient(135deg, #f59e0b, #d97706); color: #000; font-weight: 600; }
+    .btn-accent:hover { background: linear-gradient(135deg, #d97706, #b45309); }
+    .btn-accent:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-secondary { background: #2a2a4a; color: #ccc; }
     .btn-secondary:hover { background: #3a3a5a; }
     .btn-small { padding: 4px 10px; font-size: 12px; }
@@ -176,11 +179,12 @@
             <div class="search-box">
               <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch">
               <button class="btn btn-primary" @click="doSearch" :disabled="searching">🔍 {{ searching ? '搜索中...' : '搜索' }}</button>
-              <button class="btn btn-secondary" @click="openSourcePicker" :disabled="testingSources">⚙️ {{ testingSources ? '测试中...' : '更换音源' }}</button>
+              <button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? 'Agent搜索中...' : '智能获取音源' }}</button>
+              <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换音源</button>
             </div>
             <div class="source-badge" v-if="currentSource">
               <div><span style="color:#4CAF50;">✓</span> 当前音源: <b>{{ currentSource.name }}</b> <span v-if="currentSource.aiScore" style="color:#888;">(AI评分: {{ currentSource.aiScore }})</span></div>
-              <button class="btn btn-small btn-secondary" @click="showSourceModal = true">更换</button>
+              <button class="btn btn-small btn-secondary" @click="openSwitchModal">切换</button>
             </div>
             <div class="selection-bar" v-if="results.length > 0">
               <button class="btn btn-small btn-secondary" @click="selOnline = selOnline.length === results.length ? [] : results.map(function(r){return r.id})">{{ selOnline.length === results.length ? '取消全选' : '全选' }}</button>
@@ -210,7 +214,7 @@
           <!-- 私人FM -->
           <template v-if="tab === 'fm'">
             <div class="fm-card">
-              <div class="fm-icon">📻</div><div class="fm-title">私人FM</div><div class="fm-desc">根据你的收藏，智能推荐你可能喜欢的音乐</div>
+              <div class="fm-icon">📻</div><div class="fm-title">私人FM</div><div class="fm-desc">根据你的收藏,智能推荐你可能喜欢的音乐</div>
               <div v-if="!fmPlaying"><button class="btn btn-primary" @click="startFM" :disabled="fmLoading" style="padding:12px 32px;font-size:16px;">{{ fmLoading ? '⏳ 分析中...' : '🎵 开始收听' }}</button><div style="margin-top:12px;font-size:13px;color:#666;">{{ favorites.length > 0 ? '已分析 ' + favorites.length + ' 首收藏' : '将随机推荐热门歌曲' }}</div></div>
               <div v-else><button class="btn btn-secondary" @click="stopFM">⏹ 停止</button><div style="margin-top:12px;font-size:13px;color:#888;">正在播放: {{ track.title || '加载中...' }}</div></div>
             </div>
@@ -251,38 +255,40 @@
             <div style="background:#1a1a2e;padding:20px;border-radius:12px;border:1px solid #2a2a4a;">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
                 <div style="font-weight:600;">🎯 音源设置</div>
-                <button class="btn btn-secondary" @click="openSourcePicker" :disabled="testingSources">⚙️ {{ testingSources ? '测试中...' : '智能更换音源' }}</button>
+                <button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '搜索中...' : '智能获取音源' }}</button>
+                <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换</button>
               </div>
 
               <div v-if="currentSource" style="padding:10px 12px;border:1px solid #2a2a4a;border-radius:10px;background:#151526;margin-bottom:12px;">
                 <div style="font-size:13px;">
-                  <span style="color:#4CAF50;">✓</span> 当前使用音源：
+                  <span style="color:#4CAF50;">✓</span> 当前使用音源:
                   <b>{{ currentSource.name }}</b>
                   <span v-if="currentSource.aiScore" style="color:#888;">(AI评分: {{ currentSource.aiScore }})</span>
                 </div>
                 <div style="font-size:12px;color:#666;margin-top:4px;">{{ currentSource.description || '' }}</div>
               </div>
-              <div v-else style="font-size:13px;color:#666;margin-bottom:12px;">当前未选择音源，请点击“智能更换音源”。</div>
+              <div v-else style="font-size:13px;color:#666;margin-bottom:12px;">当前未选择音源，请点击「智能获取音源」。</div>
 
-              <div style="font-size:12px;color:#888;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;">
-                <span>最近分析的 Top5 音源（点击可直接切换）</span>
-                <button class="btn btn-small btn-secondary" @click="refreshTopSources">刷新列表</button>
+              <div style="font-size:12px;color:#888;margin-bottom:8px;">
+                <span>已获取的候选音源（点击可直接切换）</span>
               </div>
 
-              <div v-if="topSources.length === 0" style="font-size:13px;color:#666;">暂无 Top5 记录（请先在任意界面点一次智能更换音源）。</div>
+              <div v-if="candidates.length === 0" style="font-size:13px;color:#666;">暂无候选音源，请先点击「智能获取音源」。</div>
 
-              <div v-for="(s, i) in topSources" :key="s.source || i"
+              <div v-for="(s, i) in candidates" :key="s.searchUrl || i"
                    class="source-card"
-                   :class="{ selected: (currentSource && (s.sourceInfo?.name || s.source) === currentSource.name) }"
-                   @click="quickSelectTop(i)">
+                   :class="{ selected: currentSource && currentSource.searchUrl === s.searchUrl }"
+                   @click="switchTo(s)">
                 <div style="display:flex;align-items:center;gap:12px;">
                   <div class="source-rank">{{ i + 1 }}</div>
                   <div style="flex:1;min-width:0;">
-                    <div style="font-weight:600;font-size:14px;">{{ (s.sourceInfo && s.sourceInfo.name) || s.source }}</div>
-                    <div style="font-size:12px;color:#888;margin-top:2px;">{{ (s.sourceInfo && s.sourceInfo.description) || '' }}</div>
-                    <div style="font-size:11px;color:#666;margin-top:4px;">延迟: {{ s.latency }}ms | 结果数: {{ s.resultCount }} | 完整链接: {{ s.hasFullUrl ? '✓' : '✗' }}</div>
+                    <div style="font-weight:600;font-size:14px;">{{ s.name || '未知' }} <span v-if="currentSource && currentSource.searchUrl === s.searchUrl" style="color:#4CAF50;">✓</span></div>
+                    <div style="font-size:12px;color:#888;margin-top:2px;">{{ s.description || '' }}</div>
+                    <div style="font-size:11px;color:#666;margin-top:4px;">
+                      <span v-if="s.maxDuration">最长: {{ Math.round(s.maxDuration) }}秒</span>
+                      <span v-if="s.resultCount" style="margin-left:8px;">结果: {{ s.resultCount }}条</span>
+                    </div>
                   </div>
-                  <div class="source-score">{{ s.aiScore || Math.round(s.score || 0) }}</div>
                 </div>
               </div>
             </div>
@@ -343,32 +349,6 @@
       </div>
     </div>
 
-    <!-- Source Picker Modal -->
-    <div class="modal-mask" v-if="showSourceModal" @click.self="showSourceModal = false">
-      <div class="modal-box" style="width:560px;">
-        <div class="modal-header"><div class="modal-title">🎯 选择音源 (AI评分排序)</div><button class="modal-close" @click="showSourceModal = false">✕</button></div>
-        <div class="modal-body">
-          <div v-if="testingSources" style="text-align:center;padding:30px;color:#888;">⏳ 正在测试音源并使用AI评分，请稍候...</div>
-          <div v-else-if="sourceResults.length === 0" style="text-align:center;padding:30px;color:#888;">暂无可用的音源数据</div>
-          <div v-for="(s, i) in sourceResults" :key="s.source" class="source-card" :class="{ selected: selectedSourceIdx === i }" @click="selectedSourceIdx = i">
-            <div style="display:flex;align-items:center;gap:12px;">
-              <div class="source-rank">{{ i + 1 }}</div>
-              <div style="flex:1;min-width:0;">
-                <div style="font-weight:600;font-size:14px;">{{ (s.sourceInfo && s.sourceInfo.name) || s.source }}</div>
-                <div style="font-size:12px;color:#888;margin-top:2px;">{{ (s.sourceInfo && s.sourceInfo.description) || '' }}</div>
-                <div style="font-size:11px;color:#666;margin-top:4px;">延迟: {{ s.latency }}ms | 结果数: {{ s.resultCount }} | 完整链接: {{ s.hasFullUrl ? '✓' : '✗' }}<span v-if="s.error" style="color:#f87171;"> | 错误: {{ s.error }}</span></div>
-                <div v-if="s.details" style="font-size:11px;color:#777;margin-top:3px;">完整性:{{ s.details['完整性'] }} 响应:{{ s.details['响应速度'] }} 稳定:{{ s.details['稳定性'] }} 质量:{{ s.details['结果质量'] }}</div>
-              </div>
-              <div class="source-score">{{ s.aiScore || Math.round(s.score || 0) }}</div>
-            </div>
-          </div>
-        </div>
-        <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px;">
-          <button class="btn btn-secondary" @click="showSourceModal = false">取消</button>
-          <button class="btn btn-primary" @click="confirmSource" :disabled="selectedSourceIdx < 0">确认选择</button>
-        </div>
-      </div>
-    </div>
   </div>
 
   <script>
@@ -407,11 +387,11 @@
 
         // Source manager
         var currentSource = ref(null);
-        var showSourceModal = ref(false);
-        var sourceResults = ref([]);
-        var selectedSourceIdx = ref(-1);
+        var showSwitchModal = ref(false);
+        var showFetchError = ref(false);
+        var fetchError = ref('');
         var fetchingSources = ref(false);
-			var topSources = ref([]);
+			var candidates = ref([]);
 
         // Playlist
         var playlist = ref([]);
@@ -463,6 +443,7 @@
           return favorites.value.some(function(f) {
             return (f.id && f.id === track.value.id) || (f.path && f.path === track.value.path) || (f.title === track.value.title && f.artist === track.value.artist);
           });
+          apiGet('/source/candidates').then(function(res) { if (res.success && res.results) candidates.value = res.results; });
         });
 
         // === API ===
@@ -476,60 +457,40 @@
           });
         }
 
-			function refreshTopSources() {
-				return apiGet('/source/top').then(function(res) {
-					if (res.success && res.results) {
-						topSources.value = res.results;
-					}
-				});
-			}
-
-			function quickSelectTop(i) {
-				var s = topSources.value[i];
-				if (!s) return;
-				var srcInfo = s.sourceInfo || s;
-				apiPost('/source/select', { source: srcInfo }).then(function(res) {
-					if (res.success) {
-						currentSource.value = srcInfo;
-						if (s.aiScore) currentSource.value.aiScore = s.aiScore;
-					}
-				});
-			}
-
-        function openSourcePicker() {
-          showSourceModal.value = true;
-          sourceResults.value = [];
-          selectedSourceIdx.value = -1;
-          testingSources.value = true;
-          // 先展示上次保存的 Top5（秒开），再触发重新测试（每次更换都重新解析 OpenClaw 配置）
-          apiGet('/source/top').then(function(res) {
-            if (res.success && res.results && res.results.length > 0) {
-              sourceResults.value = res.results;
-              selectedSourceIdx.value = 0;
-            }
-          }).finally(function() {
-            // 每次打开更换音源都重新跑一次测试，拿最新源+最新AI评分
-            apiPost('/source/test', { testSong: searchQ.value || '周杰伦' }).then(function(res) {
-              if (res.success && res.results) {
-                sourceResults.value = res.results;
-                if (res.results.length > 0) selectedSourceIdx.value = 0;
-              }
-            }).finally(function() { testingSources.value = false; });
-          });
-        }
-
-        function confirmSource() {
-          if (selectedSourceIdx.value < 0) return;
-          var sel = sourceResults.value[selectedSourceIdx.value];
-          var srcInfo = sel.sourceInfo || sel;
-          apiPost('/source/select', { source: srcInfo }).then(function(res) {
+			function doFetchSources() {
+          fetchingSources.value = true;
+          fetchError.value = '';
+          showFetchError.value = false;
+          apiPost('/source/fetch', { testSong: searchQ.value || '周杰伦' }).then(function(res) {
             if (res.success) {
-              currentSource.value = srcInfo;
-              if (sel.aiScore) currentSource.value.aiScore = sel.aiScore;
-              showSourceModal.value = false;
+              candidates.value = res.results || [];
+              if (res.results.length > 0) openSwitchModal();
+            } else {
+              fetchError.value = res.error || '获取音源失败';
+              showFetchError.value = true;
+            }
+          }).catch(function(err) {
+            fetchError.value = err.message || '网络错误';
+            showFetchError.value = true;
+          }).finally(function() { fetchingSources.value = false; });
+        }
+
+        function openSwitchModal() {
+          apiGet('/source/candidates').then(function(res) {
+            if (res.success && res.results) candidates.value = res.results;
+          });
+          showSwitchModal.value = true;
+        }
+
+        function switchTo(source) {
+          apiPost('/source/select', { source: source }).then(function(res) {
+            if (res.success) {
+              currentSource.value = source;
+              showSwitchModal.value = false;
             }
           });
         }
+
 
         // === Local ===
         function doScan() {
@@ -560,6 +521,7 @@
         // === Online Search (uses saved source) ===
         function doSearch() {
           if (!searchQ.value) return;
+          if (!hasSource.value && !fetchingSources.value) { doFetchSources(); return; }
           searching.value = true; searched.value = false;
           apiGet('/source/search?q=' + encodeURIComponent(searchQ.value)).then(function(res) {
             if (res.success) {
@@ -648,7 +610,6 @@
           connectWS();
           var saved = localStorage.getItem('playMode'); if (saved) playMode.value = saved;
           loadCurrentSource();
-				refreshTopSources();
           apiGet('/local/directories').then(function(res) { if (res.success && res.musicPath) { musicDir.value = res.lastBrowse || res.musicPath; savedDir.value = musicDir.value; doScan(); } });
         });
         onUnmounted(function() { if (ws) ws.close(); });
@@ -657,14 +618,13 @@
           tab, tabTitle, track, status, volume, esp32, isLive,
           musicDir, dirName, songs, selLocal, scanning, sortBy, playingPath,
           searchQ, results, searching, searched, selOnline,
-          currentSource, showSourceModal, sourceResults, selectedSourceIdx, testingSources,
-				topSources,
+          currentSource, showSwitchModal, showFetchError, fetchError, fetchingSources, candidates,
           playlist, playlistIdx, playMode, showPlaylist, playModeIcon, playModeName, playModeTitle,
           favorites, isFav,
           fmPlaying, fmLoading,
           showDirPicker, dirs, dirLoading,
           radios, customRadioUrl,
-				loadCurrentSource, fetchSources, confirmSource, refreshTopSources, quickSelectTop,
+				loadCurrentSource, doFetchSources, openSwitchModal, switchTo,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
           doSearch, playOnline, toggleSelOnline, playSelectedOnline,
