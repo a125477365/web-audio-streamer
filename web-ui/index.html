@@ -247,6 +247,47 @@
                 <div><label style="font-size:13px;color:#888;display:block;margin-bottom:4px;">端口</label><input class="search-input" v-model.number="esp32.port" type="number"></div>
               </div>
             </div>
+
+            <div style="height:14px;"></div>
+
+            <div style="background:#1a1a2e;padding:20px;border-radius:12px;border:1px solid #2a2a4a;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
+                <div style="font-weight:600;">🎯 音源设置</div>
+                <button class="btn btn-secondary" @click="openSourcePicker" :disabled="testingSources">⚙️ {{ testingSources ? '测试中...' : '智能更换音源' }}</button>
+              </div>
+
+              <div v-if="currentSource" style="padding:10px 12px;border:1px solid #2a2a4a;border-radius:10px;background:#151526;margin-bottom:12px;">
+                <div style="font-size:13px;">
+                  <span style="color:#4CAF50;">✓</span> 当前使用音源：
+                  <b>{{ currentSource.name }}</b>
+                  <span v-if="currentSource.aiScore" style="color:#888;">(AI评分: {{ currentSource.aiScore }})</span>
+                </div>
+                <div style="font-size:12px;color:#666;margin-top:4px;">{{ currentSource.description || '' }}</div>
+              </div>
+              <div v-else style="font-size:13px;color:#666;margin-bottom:12px;">当前未选择音源，请点击“智能更换音源”。</div>
+
+              <div style="font-size:12px;color:#888;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;">
+                <span>最近分析的 Top5 音源（点击可直接切换）</span>
+                <button class="btn btn-small btn-secondary" @click="refreshTopSources">刷新列表</button>
+              </div>
+
+              <div v-if="topSources.length === 0" style="font-size:13px;color:#666;">暂无 Top5 记录（请先在任意界面点一次智能更换音源）。</div>
+
+              <div v-for="(s, i) in topSources" :key="s.source || i"
+                   class="source-card"
+                   :class="{ selected: (currentSource && (s.sourceInfo?.name || s.source) === currentSource.name) }"
+                   @click="quickSelectTop(i)">
+                <div style="display:flex;align-items:center;gap:12px;">
+                  <div class="source-rank">{{ i + 1 }}</div>
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:14px;">{{ (s.sourceInfo && s.sourceInfo.name) || s.source }}</div>
+                    <div style="font-size:12px;color:#888;margin-top:2px;">{{ (s.sourceInfo && s.sourceInfo.description) || '' }}</div>
+                    <div style="font-size:11px;color:#666;margin-top:4px;">延迟: {{ s.latency }}ms | 结果数: {{ s.resultCount }} | 完整链接: {{ s.hasFullUrl ? '✓' : '✗' }}</div>
+                  </div>
+                  <div class="source-score">{{ s.aiScore || Math.round(s.score || 0) }}</div>
+                </div>
+              </div>
+            </div>
           </template>
         </div>
 
@@ -372,6 +413,7 @@
         var sourceResults = ref([]);
         var selectedSourceIdx = ref(-1);
         var testingSources = ref(false);
+			var topSources = ref([]);
 
         // Playlist
         var playlist = ref([]);
@@ -435,6 +477,26 @@
             if (res.success && res.source) currentSource.value = res.source;
           });
         }
+
+			function refreshTopSources() {
+				return apiGet('/source/top').then(function(res) {
+					if (res.success && res.results) {
+						topSources.value = res.results;
+					}
+				});
+			}
+
+			function quickSelectTop(i) {
+				var s = topSources.value[i];
+				if (!s) return;
+				var srcInfo = s.sourceInfo || s;
+				apiPost('/source/select', { source: srcInfo }).then(function(res) {
+					if (res.success) {
+						currentSource.value = srcInfo;
+						if (s.aiScore) currentSource.value.aiScore = s.aiScore;
+					}
+				});
+			}
 
         function openSourcePicker() {
           showSourceModal.value = true;
@@ -588,6 +650,7 @@
           connectWS();
           var saved = localStorage.getItem('playMode'); if (saved) playMode.value = saved;
           loadCurrentSource();
+				refreshTopSources();
           apiGet('/local/directories').then(function(res) { if (res.success && res.musicPath) { musicDir.value = res.lastBrowse || res.musicPath; savedDir.value = musicDir.value; doScan(); } });
         });
         onUnmounted(function() { if (ws) ws.close(); });
@@ -597,12 +660,13 @@
           musicDir, dirName, songs, selLocal, scanning, sortBy, playingPath,
           searchQ, results, searching, searched, selOnline,
           currentSource, showSourceModal, sourceResults, selectedSourceIdx, testingSources,
+				topSources,
           playlist, playlistIdx, playMode, showPlaylist, playModeIcon, playModeName, playModeTitle,
           favorites, isFav,
           fmPlaying, fmLoading,
           showDirPicker, dirs, dirLoading,
           radios, customRadioUrl,
-          loadCurrentSource, openSourcePicker, confirmSource,
+				loadCurrentSource, openSourcePicker, confirmSource, refreshTopSources, quickSelectTop,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
           doSearch, playOnline, toggleSelOnline, playSelectedOnline,
