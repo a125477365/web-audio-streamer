@@ -319,6 +319,10 @@ export class SourceManager {
 	 */
 	_simpleEvaluation(source, testData) {
 		let score = 50;
+		// 行业标准：不可用的源直接判 0
+		if (testData.success === false) return { source: source.name, success: false, ...testData, score: 0 };
+		if (!testData.hasFullUrl) score -= 80;
+		if (testData.resultCount === 0) score -= 60;
 		
 		if (testData.hasFullUrl) score += 40;
 		else score -= 30;
@@ -333,7 +337,7 @@ export class SourceManager {
 		score += (source.priority || 5) * 5;
 		
 		if (source.knownIssue) score -= 30;
-		// 如果探测到试听/短片段，直接让它出局（策略 S：强力过滤）
+		// 如果探测到试听/短片段，直接让它出局
 		if (testData.isPreview) score = 0;
 
 		return {

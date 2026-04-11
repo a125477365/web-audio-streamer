@@ -495,8 +495,12 @@ app.post("/api/source/test", async (req, res) => {
 		const { testSong = "周杰伦" } = req.body;
 		console.log(`[Source] Testing sources with "${testSong}"...`);
 		let results = await sourceManager.testAndRankSources(testSong);
-		// 策略 S：尽量不要试听/短片段音源，把 isPreview 的源从 Top5 里剔除
-		results = (results || []).filter(r => !r.isPreview);
+		// 行业标准策略：候选必须“可用且完整”，再剔除试听/短片段
+		results = (results || [])
+			.filter(r => r.success !== false)
+			.filter(r => r.resultCount > 0)
+			.filter(r => r.hasFullUrl)
+			.filter(r => !r.isPreview);
 		res.json({ success: true, results });
 	} catch (error) {
 		console.error("[Source] Test failed:", error.message);
