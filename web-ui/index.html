@@ -190,7 +190,18 @@
             <ul class="song-list" v-if="results.length > 0">
               <li class="song-item" v-for="s in results" :key="s.id" @click="playOnline(s)">
                 <div class="song-check" :class="{ checked: selOnline.includes(s.id) }" @click.stop="toggleSelOnline(s.id)">{{ selOnline.includes(s.id) ? '☑' : '☐' }}</div>
-                <div class="song-info"><div class="song-title">{{ s.title }}</div><div class="song-artist">{{ s.artist }}</div></div>
+                <div class="song-info">
+                  <div class="song-title">{{ s.title }}</div>
+                  <div class="song-artist">{{ s.artist }}</div>
+                  <div style="font-size:11px;color:#666;margin-top:2px;">
+                    <span v-if="s.duration">时长: {{ fmtDur(s.duration) }}</span>
+                    <span v-else>时长: --</span>
+                    <span style="margin-left:10px;" v-if="s.sizeText">大小: {{ s.sizeText }}</span>
+                    <span style="margin-left:10px;" v-if="s.sampleRate">采样: {{ s.sampleRate }}Hz</span>
+                    <span style="margin-left:10px;" v-if="s.bitsPerSample">位深: {{ s.bitsPerSample }}bit</span>
+                    <span style="margin-left:10px;" v-if="s.channels">声道: {{ s.channels }}</span>
+                  </div>
+                </div>
                 <div class="song-actions"><button class="btn btn-small btn-primary" @click.stop="playOnline(s)">▶</button></div>
               </li>
             </ul>
@@ -430,12 +441,21 @@
           sourceResults.value = [];
           selectedSourceIdx.value = -1;
           testingSources.value = true;
-          apiPost('/source/test', { testSong: searchQ.value || '周杰伦' }).then(function(res) {
-            if (res.success && res.results) {
+          // 先展示上次保存的 Top5（秒开），再触发重新测试（每次更换都重新解析 OpenClaw 配置）
+          apiGet('/source/top').then(function(res) {
+            if (res.success && res.results && res.results.length > 0) {
               sourceResults.value = res.results;
-              if (res.results.length > 0) selectedSourceIdx.value = 0;
+              selectedSourceIdx.value = 0;
             }
-          }).finally(function() { testingSources.value = false; });
+          }).finally(function() {
+            // 每次打开更换音源都重新跑一次测试，拿最新源+最新AI评分
+            apiPost('/source/test', { testSong: searchQ.value || '周杰伦' }).then(function(res) {
+              if (res.success && res.results) {
+                sourceResults.value = res.results;
+                if (res.results.length > 0) selectedSourceIdx.value = 0;
+              }
+            }).finally(function() { testingSources.value = false; });
+          });
         }
 
         function confirmSource() {
@@ -489,6 +509,14 @@
             }
           }).finally(function() { searching.value = false; });
         }
+        function fmtDur(d) {
+          // 支持秒或毫秒
+          var sec = d > 10000 ? Math.floor(d/1000) : Math.floor(d);
+          var m = Math.floor(sec / 60);
+          var s2 = sec % 60;
+          return m + ':' + (s2 < 10 ? '0' : '') + s2;
+        }
+
         function playOnline(s) {
           var playUrl = s.playUrl || '';
           var url = '/online/play?' + (playUrl ? 'url=' + encodeURIComponent(playUrl) : 'id=' + s.id);
@@ -578,6 +606,7 @@
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
           doSearch, playOnline, toggleSelOnline, playSelectedOnline,
+          fmtDur,
           startFM, stopFM,
           playRadio, playCustomRadio,
           togglePlay, setVolume, seek, prev, next, togglePlayMode,

@@ -56,6 +56,17 @@ const recommender = new RecommendationEngine(config);
 const smartSourceFinder = new SmartSourceFinder(config);
 const sourceManager = new SourceManager();
 
+// 启动时注入已保存的音源，确保重启后搜索立即生效
+try {
+	const saved = sourceManager.getCurrentSource();
+	if (saved) {
+		onlineApi.setSource(saved);
+		console.log('[Source] Loaded saved source on boot:', saved.name);
+	}
+} catch (e) {
+	console.warn('[Source] Failed to load saved source on boot:', e.message);
+}
+
 // ==================== 本地音乐 API ====================
 
 /**
@@ -503,6 +514,8 @@ app.post("/api/source/select", async (req, res) => {
 			return res.status(400).json({ success: false, error: "Missing source info" });
 		}
 		const saved = sourceManager.saveSource(source);
+		// 立即注入 OnlineMusicApi，使本次进程立刻生效
+		onlineApi.setSource(source);
 		if (saved) {
 			res.json({ success: true, message: `已选择音源: ${source.name}` });
 		} else {
@@ -510,6 +523,18 @@ app.post("/api/source/select", async (req, res) => {
 		}
 	} catch (error) {
 		res.status(500).json({ success: false, error: error.message });
+	}
+});
+
+/**
+ * 获取上次测试得到的 Top5 音源（长期保存）
+ */
+app.get('/api/source/top', (req, res) => {
+	try {
+		const top = sourceManager.getTopSources();
+		res.json({ success: true, results: top });
+	} catch (e) {
+		res.status(500).json({ success: false, error: e.message });
 	}
 });
 
@@ -547,8 +572,12 @@ app.get("/api/source/search", async (req, res) => {
 			if (results.length > 0) {
 				currentSource = results[0].sourceInfo;
 				sourceManager.saveSource(currentSource);
+				onlineApi.setSource(currentSource);
 			}
 		}
+
+		// 确保 OnlineMusicApi 使用的是当前音源
+		onlineApi.setSource(currentSource);
 
 		// 使用当前音源搜索
 		const results = await onlineApi.search(q);

@@ -24,15 +24,38 @@ const QUALITY_RANK = {
   'low': 10        // 低音质
 };
 
-// API 配置
-const NXVAV_API = 'https://api.nxvav.cn/api/music/';
-const NXVAV_TOKEN = 'nxvav';  // 公共 token
+// 默认 API（兜底）
+const DEFAULT_API = 'https://api.nxvav.cn/api/music/';
+const NXVAV_TOKEN = 'nxvav'; // nuoxian 的公共 token（仅用于该类 API 的 auth 生成）
 
 export class OnlineMusicApi {
   constructor(config) {
     this.config = config;
     this.provider = config.online?.provider || 'netease';
+		// 当前音源（可由 SourceManager 选择后注入）
+		this.source = {
+			name: 'default',
+			searchUrl: DEFAULT_API,
+			format: 'json',
+			needsAuth: false,
+		};
   }
+
+	/**
+	 * 设置当前音源（会影响后续 search/getSongUrl 等）
+	 */
+	setSource(source) {
+		if (source && source.searchUrl) {
+			this.source = { ...this.source, ...source };
+		}
+	}
+
+	/**
+	 * 获取当前 baseUrl
+	 */
+	_getBaseUrl() {
+		return this.source?.searchUrl || DEFAULT_API;
+	}
 
   /**
    * 生成认证 token (HMAC-SHA1)
@@ -47,8 +70,17 @@ export class OnlineMusicApi {
    */
   async search(query, type = 'song') {
     try {
-      // 使用 nuoxian API 搜索（URL 必须以 / 结尾）
-      const url = `${NXVAV_API}?server=${this.provider}&type=search&id=${encodeURIComponent(query)}`;
+      const base = this._getBaseUrl();
+      // 兼容不同落雪/音乐 API 的常见参数形式
+      let url;
+			if (this.source?.name === 'injahow-meting') {
+				url = `${base}?type=search&id=${encodeURIComponent(query)}`;
+			} else if (this.source?.name === 'bugpk') {
+				url = `${base}?media=${this.provider}&type=search&id=${encodeURIComponent(query)}`;
+			} else {
+				// 默认按 nuoxian 风格
+				url = `${base}?server=${this.provider}&type=search&id=${encodeURIComponent(query)}`;
+			}
       const data = await this._fetchWithRedirect(url);
 
       if (!Array.isArray(data)) {
@@ -60,25 +92,28 @@ export class OnlineMusicApi {
         };
       }
 
-      // 处理搜索结果
+      // 处理搜索结果（尽量兼容多种返回结构）
       const songs = data.map((item, index) => {
-        // 从 URL 中提取歌曲 ID
+        // 从 URL 中提取歌曲 ID（nuoxian 等）
         const idMatch = item.url?.match(/id=(\d+)/);
-        const id = idMatch ? idMatch[1] : `unknown_${index}`;
+        const id = item.id || (idMatch ? idMatch[1] : `unknown_${index}`);
 
         return {
-          id: id,
-          title: item.title || '未知',
-          artist: item.author || '未知',
-          album: '',
-          cover: item.pic || '',
-          playUrl: item.url || '',  // 完整播放URL（带auth）
-          duration: null,
-          format: 'mp3',
-          size: null,
-          sizeText: '未知',
-          bitrate: '高品质',
-          qualityScore: 50
+          id,
+          title: item.title || item.name || '未知',
+          artist: item.author || item.artist || '未知',
+          album: item.album || '',
+          cover: item.pic || item.cover || '',
+          playUrl: item.url || item.playUrl || '',
+          // 可选信息：有些源会带这些字段
+          duration: item.duration || item.time || null,
+          size: item.size || null,
+          sizeText: item.sizeText || (item.size ? `${Math.round(item.size / 1024 / 1024 * 10) / 10}MB` : '未知'),
+          sampleRate: item.sampleRate || null,
+          bitsPerSample: item.bitsPerSample || null,
+          channels: item.channels || null,
+          bitrate: item.bitrate || '未知',
+          qualityScore: item.qualityScore || 50,
         };
       });
 
@@ -98,7 +133,8 @@ export class OnlineMusicApi {
    */
   async getSongDetail(id) {
     try {
-      const url = `${NXVAV_API}?server=${this.provider}&type=song&id=${id}`;
+      const base = this._getBaseUrl();
+      const url = `${base}?server=${this.provider}&type=song&id=${id}`;
       const data = await this._fetchWithRedirect(url);
 
       if (data && data.title) {
@@ -122,8 +158,17 @@ export class OnlineMusicApi {
    */
   async getSongUrl(id) {
     try {
-      const auth = this._generateAuth(id, 'url');
-      const url = `${NXVAV_API}?server=${this.provider}&type=url&id=${id}&auth=${auth}`;
+      const base = this._getBaseUrl();
+			// 非 nuoxian 类 API 可能不需要 auth
+			let url;
+			if (this.source?.name === 'injahow-meting') {
+				url = `${base}?type=url&id=${id}`;
+			} else if (this.source?.name === 'bugpk') {
+				url = `${base}?media=${this.provider}&type=url&id=${id}`;
+			} else {
+				const auth = this._generateAuth(id, 'url');
+				url = `${base}?server=${this.provider}&type=url&id=${id}&auth=${auth}`;
+			}
 
       // 获取重定向后的真实音频链接
       const realUrl = await this._getRedirectUrl(url);
@@ -177,8 +222,16 @@ export class OnlineMusicApi {
    */
   async getLyric(id) {
     try {
-      const auth = this._generateAuth(id, 'lrc');
-      const url = `${NXVAV_API}?server=${this.provider}&type=lrc&id=${id}&auth=${auth}`;
+      const base = this._getBaseUrl();
+			let url;
+			if (this.source?.name === 'injahow-meting') {
+				url = `${base}?type=lrc&id=${id}`;
+			} else if (this.source?.name === 'bugpk') {
+				url = `${base}?media=${this.provider}&type=lrc&id=${id}`;
+			} else {
+				const auth = this._generateAuth(id, 'lrc');
+				url = `${base}?server=${this.provider}&type=lrc&id=${id}&auth=${auth}`;
+			}
       const data = await this._fetchWithRedirect(url);
       return data;
     } catch (error) {

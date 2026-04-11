@@ -15,6 +15,9 @@ import os from 'os';
 import crypto from 'crypto';
 
 // 配置文件路径
+// 需要长期保存：
+// - topSources: 最近一次 AI 评估的前 5 个音源（用于 UI 展示 + 快速切换）
+// - selectedSource: 用户当前选中的音源
 const CONFIG_DIR = path.join(os.homedir(), '.openclaw', 'web-audio-streamer');
 const SOURCE_CONFIG_FILE = path.join(CONFIG_DIR, 'source-config.json');
 
@@ -88,14 +91,48 @@ export class SourceManager {
 	}
 
 	/**
+	 * 获取已保存的 Top5 音源列表
+	 */
+	getTopSources() {
+		if (!this.config) {
+			this.loadSavedSource();
+		}
+		return this.config?.topSources || [];
+	}
+
+	/**
+	 * 保存 Top5 音源列表（长期保存）
+	 */
+	saveTopSources(topSources) {
+		try {
+			const existing = this.config || this.loadSavedSource() || {};
+			const next = {
+				...existing,
+				topSources: topSources,
+				lastTestAt: new Date().toISOString(),
+				version: 2,
+			};
+			fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(next, null, 2));
+			this.config = next;
+			console.log('[SourceManager] Saved topSources:', Array.isArray(topSources) ? topSources.length : 0);
+			return true;
+		} catch (e) {
+			console.error('[SourceManager] Failed to save topSources:', e.message);
+			return false;
+		}
+	}
+
+	/**
 	 * 保存用户选择的音源
 	 */
 	saveSource(source) {
 		try {
+			const existing = this.config || this.loadSavedSource() || {};
 			const config = {
+				...existing,
 				selectedSource: source,
 				selectedAt: new Date().toISOString(),
-				version: 1
+				version: Math.max(existing.version || 1, 2),
 			};
 			fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(config, null, 2));
 			this.config = config;
@@ -384,6 +421,8 @@ export class SourceManager {
 		// 返回前5个
 		const top5 = results.slice(0, 5);
 		console.log(`[SourceManager] Top 5 sources:`, top5.map(r => `${r.source}(${r.score})`));
+		// 长期保存 Top5（包含评分/测试信息）
+		this.saveTopSources(top5);
 		
 		return top5;
 	}
