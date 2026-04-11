@@ -333,8 +333,8 @@ export class SourceManager {
 		score += (source.priority || 5) * 5;
 		
 		if (source.knownIssue) score -= 30;
-		// 如果探测到试听，强力降权（尽量让试听源不进入 Top5）
-		if (testData.isPreview) score -= 80;
+		// 如果探测到试听/短片段，直接让它出局（策略 S：强力过滤）
+		if (testData.isPreview) score = 0;
 
 		return {
 			source: source.name,

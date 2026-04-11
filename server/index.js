@@ -494,7 +494,9 @@ app.post("/api/source/test", async (req, res) => {
 	try {
 		const { testSong = "周杰伦" } = req.body;
 		console.log(`[Source] Testing sources with "${testSong}"...`);
-		const results = await sourceManager.testAndRankSources(testSong);
+		let results = await sourceManager.testAndRankSources(testSong);
+		// 策略 S：尽量不要试听/短片段音源，把 isPreview 的源从 Top5 里剔除
+		results = (results || []).filter(r => !r.isPreview);
 		res.json({ success: true, results });
 	} catch (error) {
 		console.error("[Source] Test failed:", error.message);
