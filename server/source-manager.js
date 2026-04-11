@@ -104,10 +104,26 @@ export class SourceManager {
     );
 
     if (validSources.length === 0) {
-      throw new Error(
-        "Agent 未找到可用的音乐搜索API（可能搜索受限，请稍后重试）",
-      );
-    }
+			// Agent 没找到有效源，使用预定义的后备源
+			console.log("[SourceManager] Agent returned no valid APIs, using fallback sources");
+			const fallbacks = this._getFallbackSources();
+			console.log("[SourceManager] Testing", fallbacks.length, "fallback sources...");
+			const tested = await this._testSources(fallbacks, testSong);
+			if (tested.length === 0) {
+				throw new Error("所有音源均不可用，请稍后重试");
+			}
+			this.config = this.config || {};
+			this.config.candidates = tested.slice(0, 6);
+			this.config.lastFetchAt = new Date().toISOString();
+			this.config.fetchTestSong = testSong;
+			this.config.version = 5;
+			this.saveConfig(this.config);
+			if (!this.config.selectedSource) {
+				this.selectSource(tested[0]);
+			}
+			console.log("[SourceManager] Using", tested.length, "fallback sources:", tested.map(s => s.name));
+			return tested;
+		}
 
     // 限制最多6个
     const top6 = validSources.slice(0, 6);
@@ -138,41 +154,27 @@ export class SourceManager {
    * 调用 OpenClaw Agent
    * Agent 负责搜索、测试、筛选试听源
    */
-  _callAgent(testSong) {
+  
+	_getFallbackSources() {
+		return [
+			{ name: "落雪音乐 API", searchUrl: "https://api.nxvav.cn/api/music/", description: "落雪音乐API，多平台支持" },
+			{ name: "Injahow Meting", searchUrl: "https://api.injahow.cn/meting/", description: "Meting API，多平台" },
+			{ name: "BugPK Music", searchUrl: "https://api.paugram.com/netease/", description: "网易云音乐搜索" }
+		];
+	}
+
+	_callAgent(testSong) {
     return new Promise((resolve) => {
       console.log("[SourceManager] Calling OpenClaw Agent...");
 
       const prompt = [
-        `你现在是一个音乐API搜索测试工具。请完成以下完整流程：`,
-        ``,
-        `第一步：搜索`,
-        `使用 web_search 搜索："落雪音乐API 免费搜索接口"`,
-        `如果 web_search 不可用，使用 web_fetch 访问 GitHub 搜索结果页面`,
-        ``,
-        `第二步：找到实际的音乐搜索API地址`,
-        `注意：我需要的是可以直接 HTTP GET 请求的 API 地址，例如：`,
-        `- https://api.example.com/music?name=歌名`,
-        `- https://example.com/api/search?keyword=歌名`,
-        `不是 GitHub 仓库链接，不是文档链接`,
-        ``,
-        `第三步：测试找到的 API（用 exec 工具）`,
-        `对每个找到的 API，执行：curl -s --max-time 10 "API_URL?server=netease&type=search&id=${testSong}"`,
-        `如果返回了 JSON 且包含歌曲列表，说明 API 可用`,
-        ``,
-        `第四步：从返回结果中提取播放链接，测试时长`,
-        `用 exec 工具执行：ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "PLAY_URL"`,
-        `如果时长 >= 90秒，说明不是试听源`,
-        ``,
-        `第五步：输出`,
-        `只输出有效的、非试听的 API。格式必须是：`,
-        `>>>MUSIC_SOURCES_START<<<`,
-        `[{"name":"API名称","searchUrl":"完整的可直接HTTP请求的搜索API地址","description":"简短描述","maxDuration":最长歌曲秒数,"resultCount":搜索结果条数}]`,
-        `>>>MUSIC_SOURCES_END<<<`,
-        ``,
-        `如果找不到可用源，输出：>>>MUSIC_SOURCES_START<<<\n[]\n>>>MUSIC_SOURCES_END<<<`,
-      ].join("\n");
-
-      const sessionId = "music-source-fetch-" + Date.now();
+	"搜索免费音乐API。",
+	"输出格式:",
+	">>>MUSIC_SOURCES_START<<<",
+	"[{\"name\":\"API名\",\"searchUrl\":\"https://xxx\",\"description\":\"描述\"}]",
+	">>>MUSIC_SOURCES_END<<<",
+].join("\n");
+const sessionId = "music-source-fetch-" + Date.now();
 
       // 不使用 --json，让 stdout 直接是 Agent 的文本回复
       const proc = spawn(
