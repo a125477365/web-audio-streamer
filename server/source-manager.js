@@ -14,6 +14,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
+import { execSync } from 'child_process';
 
 // 配置文件路径
 // 需要长期保存：
@@ -337,7 +338,7 @@ export class SourceManager {
 		score += (source.priority || 5) * 5;
 		
 		if (source.knownIssue) score -= 30;
-		// 如果探测到试听/短片段，直接让它出局
+		// 如果整个源都是试听（所有抽样都短），直接出局
 		if (testData.isPreview) score = 0;
 
 		return {
@@ -350,6 +351,8 @@ export class SourceManager {
 
 	/**
 	 * 测试单个音源
+	 * 行业标准：抽样前5条结果，取最长的duration来判断是否为试听源
+	 * 只要有一条 >= 180s 就认为该源可以提供完整歌曲
 	 */
 	async _testSource(source, testSong = '周杰伦') {
 		const startTime = Date.now();
@@ -375,19 +378,40 @@ export class SourceManager {
 			const data = await this._fetch(url);
 			const latency = Date.now() - startTime;
 			const resultCount = this._countResults(data);
-			const firstUrl = this._extractFirstPlayUrl(data);
 			const hasFullUrl = this._checkFullUrl(data);
-			// 试听检测：探测第一条结果的时长（秒）
-			const durationSec = firstUrl ? this._probeDuration(firstUrl) : null;
-			const isPreview = typeof durationSec === 'number' && durationSec > 0 && durationSec < 90;
+
+			// 抽样前5条的播放链接，探测duration
+			const items = Array.isArray(data) ? data : (data?.results || data?.data || []);
+			const sampleItems = items.slice(0, 5);
+			const sampleResults = [];
+
+			let maxDuration = 0;
+			let hasFullSong = false;
+
+			for (const item of sampleItems) {
+				const itemUrl = item?.playUrl || item?.url;
+				if (!itemUrl) continue;
+				const dur = this._probeDuration(itemUrl);
+				sampleResults.push({ url: itemUrl, duration: dur });
+				if (typeof dur === 'number' && dur > maxDuration) {
+					maxDuration = dur;
+				}
+			}
+
+			// 判断标准：至少有一条 >= 180s 才认为该源能提供完整歌曲
+			hasFullSong = maxDuration >= 180;
+			// 如果所有抽样的都有duration且都 < 90s，才判定为纯试听源
+			const isPreview = sampleResults.length > 0 && !hasFullSong && maxDuration > 0 && maxDuration < 90;
+
+			console.log(`[SourceManager] ${source.name}: sampled ${sampleResults.length}, maxDuration=${maxDuration}s, hasFullSong=${hasFullSong}, isPreview=${isPreview}`);
 
 			return {
 				success: true,
 				latency,
 				resultCount,
 				hasFullUrl,
-				firstUrl: firstUrl || null,
-				durationSec,
+				maxDuration,
+				hasFullSong,
 				isPreview,
 				rawData: data
 			};
@@ -397,8 +421,8 @@ export class SourceManager {
 				latency: Date.now() - startTime,
 				resultCount: 0,
 				hasFullUrl: false,
-				firstUrl: null,
-				durationSec: null,
+				maxDuration: 0,
+				hasFullSong: false,
 				isPreview: false,
 				error: e.message
 			};
@@ -414,6 +438,33 @@ export class SourceManager {
 		} catch {
 			return null;
 		}
+	}
+
+	/**
+	 * 批量探测搜索结果中每首歌的duration（用于搜索结果标记试听）
+	 * 只探测前 probeLimit 条，避免太慢
+	 */
+	probeSearchResults(items, probeLimit = 10) {
+		const results = [];
+		const toProbe = items.slice(0, probeLimit);
+
+		for (const item of toProbe) {
+			const url = item?.playUrl || item?.url;
+			if (!url) {
+				results.push({ ...item, durationSec: null, isPreview: null });
+				continue;
+			}
+			const dur = this._probeDuration(url);
+			const isPreview = typeof dur === 'number' && dur > 0 && dur < 90;
+			results.push({ ...item, durationSec: dur, isPreview });
+		}
+
+		// 剩余的不探测
+		for (const item of items.slice(probeLimit)) {
+			results.push({ ...item, durationSec: null, isPreview: null });
+		}
+
+		return results;
 	}
 
 	_probeDuration(inputUrl) {
@@ -455,16 +506,46 @@ export class SourceManager {
 			results.push(result);
 		}
 
-		// 按分数排序
+		// 按分数排序，返回前5个
 		results.sort((a, b) => b.score - a.score);
-
-		// 返回前5个
 		const top5 = results.slice(0, 5);
 		console.log(`[SourceManager] Top 5 sources:`, top5.map(r => `${r.source}(${r.score})`));
-		// 长期保存 Top5（包含评分/测试信息）
 		this.saveTopSources(top5);
-		
 		return top5;
+	}
+
+	/**
+	 * 保存 Top5 源（长期持久化，重启不丢）
+	 */
+	saveTopSources(top5) {
+		try {
+			const config = this.loadSavedSource() || {};
+			config.topSources = top5.map(r => ({
+				source: r.source,
+				aiScore: r.aiScore || Math.round(r.score),
+				score: r.score,
+				latency: r.latency,
+				resultCount: r.resultCount,
+				hasFullUrl: r.hasFullUrl,
+				hasFullSong: r.hasFullSong,
+				isPreview: r.isPreview,
+				maxDuration: r.maxDuration,
+				details: r.details || null,
+				sourceInfo: r.sourceInfo || null,
+				testedAt: new Date().toISOString()
+			}));
+			fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(config, null, 2));
+		} catch (e) {
+			console.error('[SourceManager] Failed to save top sources:', e.message);
+		}
+	}
+
+	/**
+	 * 读取已保存的 Top5
+	 */
+	getTopSources() {
+		const config = this.loadSavedSource();
+		return config?.topSources || [];
 	}
 
 	// 辅助方法

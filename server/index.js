@@ -586,7 +586,12 @@ app.get("/api/source/search", async (req, res) => {
 		onlineApi.setSource(currentSource);
 
 		// 使用当前音源搜索
-		const results = await onlineApi.search(q);
+		let results = await onlineApi.search(q);
+		
+		// 批量探测搜索结果的duration，标记试听/完整
+		if (Array.isArray(results) && results.length > 0) {
+			results = sourceManager.probeSearchResults(results, 15);
+		}
 		
 		res.json({ 
 			success: true, 

@@ -191,15 +191,13 @@
               <li class="song-item" v-for="s in results" :key="s.id" @click="playOnline(s)">
                 <div class="song-check" :class="{ checked: selOnline.includes(s.id) }" @click.stop="toggleSelOnline(s.id)">{{ selOnline.includes(s.id) ? '☑' : '☐' }}</div>
                 <div class="song-info">
-                  <div class="song-title">{{ s.title }}</div>
+                  <div class="song-title">{{ s.title }} <span v-if="s.isPreview===true" style="font-size:11px;color:#f59e0b;background:#2a2210;padding:1px 6px;border-radius:4px;margin-left:6px;">&#x26A0; 试听 {{ s.durationSec ? Math.round(s.durationSec)+'s' : '&lt;90s' }}</span><span v-else-if="s.isPreview===false && s.durationSec" style="font-size:10px;color:#4ade80;margin-left:6px;">&#x2713; 完整 {{ Math.round(s.durationSec)+'s' }}</span></div>
                   <div class="song-artist">{{ s.artist }}</div>
                   <div style="font-size:11px;color:#666;margin-top:2px;">
-                    <span v-if="s.duration">时长: {{ fmtDur(s.duration) }}</span>
+                    <span v-if="s.durationSec">时长: {{ fmtDur(s.durationSec*1000) }}</span>
+                    <span v-else-if="s.duration">时长: {{ fmtDur(s.duration) }}</span>
                     <span v-else>时长: --</span>
                     <span style="margin-left:10px;" v-if="s.sizeText">大小: {{ s.sizeText }}</span>
-                    <span style="margin-left:10px;" v-if="s.sampleRate">采样: {{ s.sampleRate }}Hz</span>
-                    <span style="margin-left:10px;" v-if="s.bitsPerSample">位深: {{ s.bitsPerSample }}bit</span>
-                    <span style="margin-left:10px;" v-if="s.channels">声道: {{ s.channels }}</span>
                   </div>
                 </div>
                 <div class="song-actions"><button class="btn btn-small btn-primary" @click.stop="playOnline(s)">▶</button></div>
