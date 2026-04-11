@@ -180,7 +180,7 @@
             </div>
             <div class="source-badge" v-if="currentSource">
               <div><span style="color:#4CAF50;">✓</span> 当前音源: <b>{{ currentSource.name }}</b> <span v-if="currentSource.aiScore" style="color:#888;">(AI评分: {{ currentSource.aiScore }})</span></div>
-              <button class="btn btn-small btn-secondary" @click="openSourcePicker">更换</button>
+              <button class="btn btn-small btn-secondary" @click="showSourceModal = true">更换</button>
             </div>
             <div class="selection-bar" v-if="results.length > 0">
               <button class="btn btn-small btn-secondary" @click="selOnline = selOnline.length === results.length ? [] : results.map(function(r){return r.id})">{{ selOnline.length === results.length ? '取消全选' : '全选' }}</button>
@@ -204,7 +204,7 @@
               </li>
             </ul>
             <div class="empty-state" v-else-if="searched"><div class="empty-icon">🔍</div><div class="empty-text">没有找到结果</div></div>
-            <div class="empty-state" v-else><div class="empty-icon">🌐</div><div class="empty-text">搜索在线音乐</div><div class="empty-hint" v-if="!currentSource">请先点击 "更换音源" 选择音源</div></div>
+            <div class="empty-state" v-else><div class="empty-icon">🌐</div><div class="empty-text">搜索在线音乐</div><div class="empty-hint" v-if="!currentSource">请先点击 "智能获取音源" 获取可用音源</div></div>
           </template>
 
           <!-- 私人FM -->
@@ -410,7 +410,7 @@
         var showSourceModal = ref(false);
         var sourceResults = ref([]);
         var selectedSourceIdx = ref(-1);
-        var testingSources = ref(false);
+        var fetchingSources = ref(false);
 			var topSources = ref([]);
 
         // Playlist
@@ -664,7 +664,7 @@
           fmPlaying, fmLoading,
           showDirPicker, dirs, dirLoading,
           radios, customRadioUrl,
-				loadCurrentSource, openSourcePicker, confirmSource, refreshTopSources, quickSelectTop,
+				loadCurrentSource, fetchSources, confirmSource, refreshTopSources, quickSelectTop,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
           doSearch, playOnline, toggleSelOnline, playSelectedOnline,

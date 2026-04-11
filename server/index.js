@@ -58,13 +58,13 @@ const sourceManager = new SourceManager();
 
 // 启动时注入已保存的音源，确保重启后搜索立即生效
 try {
-	const saved = sourceManager.getCurrentSource();
-	if (saved) {
-		onlineApi.setSource(saved);
-		console.log('[Source] Loaded saved source on boot:', saved.name);
-	}
+  const saved = sourceManager.getCurrentSource();
+  if (saved) {
+    onlineApi.setSource(saved);
+    console.log("[Source] Loaded saved source on boot:", saved.name);
+  }
 } catch (e) {
-	console.warn('[Source] Failed to load saved source on boot:', e.message);
+  console.warn("[Source] Failed to load saved source on boot:", e.message);
 }
 
 // ==================== 本地音乐 API ====================
@@ -286,13 +286,11 @@ app.post("/api/local/play-batch", async (req, res) => {
   } catch (error) {
     const isEsp32Error =
       error.message && error.message.includes("No ACK after");
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: error.message,
-        errorType: isEsp32Error ? "ESP32_CONNECTION_FAILED" : "PLAYBACK_ERROR",
-      });
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      errorType: isEsp32Error ? "ESP32_CONNECTION_FAILED" : "PLAYBACK_ERROR",
+    });
   }
 });
 
@@ -313,13 +311,11 @@ app.get("/api/local/play", async (req, res) => {
   } catch (error) {
     const isEsp32Error =
       error.message && error.message.includes("No ACK after");
-    res
-      .status(500)
-      .json({
-        success: false,
-        error: error.message,
-        errorType: isEsp32Error ? "ESP32_CONNECTION_FAILED" : "PLAYBACK_ERROR",
-      });
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      errorType: isEsp32Error ? "ESP32_CONNECTION_FAILED" : "PLAYBACK_ERROR",
+    });
   }
 });
 
@@ -486,62 +482,64 @@ app.get("/api/radio/play", async (req, res) => {
 // ==================== 音源管理 ====================
 
 /**
- * 智能测试所有音源，返回前5个最佳（使用AI评分）
- * POST /api/source/test
- * Body: { testSong: "周杰伦" }
+ * 智能获取音源（调用 OpenClaw Agent 联网搜索）
+ * POST /api/source/fetch
  */
-app.post("/api/source/test", async (req, res) => {
-	try {
-		const { testSong = "周杰伦" } = req.body;
-		console.log(`[Source] Testing sources with "${testSong}"...`);
-		let results = await sourceManager.testAndRankSources(testSong);
-		// 行业标准策略：候选必须“可用且完整”，再剔除试听/短片段
-		results = (results || [])
-			.filter(r => r.success !== false)
-			.filter(r => r.resultCount > 0)
-			.filter(r => r.hasFullUrl)
-			.filter(r => !r.isPreview);
-		res.json({ success: true, results });
-	} catch (error) {
-		console.error("[Source] Test failed:", error.message);
-		res.status(500).json({ success: false, error: error.message });
-	}
+app.post("/api/source/fetch", async (req, res) => {
+  try {
+    const { testSong = "周杰伦" } = req.body;
+    console.log('[Source] Smart fetching sources with "' + testSong + '"...');
+    
+    const results = await sourceManager.fetchAndTestSources(testSong);
+    
+    res.json({ 
+      success: true, 
+      results,
+      message: results.length > 0 
+        ? '发现 ' + results.length + ' 个可用音源' 
+        : '未找到可用音源，请重试'
+    });
+  } catch (error) {
+    console.error("[Source] Fetch failed:", error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * 获取候选音源列表
+ * GET /api/source/candidates
+ */
+app.get("/api/source/candidates", (req, res) => {
+  try {
+    const candidates = sourceManager.getCandidateSources();
+    res.json({ success: true, results: candidates });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 /**
  * 保存用户选择的音源
  * POST /api/source/select
- * Body: { source: {...} }
  */
 app.post("/api/source/select", async (req, res) => {
-	try {
-		const { source } = req.body;
-		if (!source || !source.name) {
-			return res.status(400).json({ success: false, error: "Missing source info" });
-		}
-		const saved = sourceManager.saveSource(source);
-		// 立即注入 OnlineMusicApi，使本次进程立刻生效
-		onlineApi.setSource(source);
-		if (saved) {
-			res.json({ success: true, message: `已选择音源: ${source.name}` });
-		} else {
-			res.status(500).json({ success: false, error: "Failed to save source" });
-		}
-	} catch (error) {
-		res.status(500).json({ success: false, error: error.message });
-	}
-});
-
-/**
- * 获取上次测试得到的 Top5 音源（长期保存）
- */
-app.get('/api/source/top', (req, res) => {
-	try {
-		const top = sourceManager.getTopSources();
-		res.json({ success: true, results: top });
-	} catch (e) {
-		res.status(500).json({ success: false, error: e.message });
-	}
+  try {
+    const { source } = req.body;
+    if (!source || !source.searchUrl) {
+      return res.status(400).json({ success: false, error: "Missing source info" });
+    }
+    
+    sourceManager.saveSelectedSource(source);
+    onlineApi.setSource(source);
+    
+    res.json({ 
+      success: true, 
+      message: '已选择音源: ' + source.name,
+      source
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 /**
@@ -549,12 +547,33 @@ app.get('/api/source/top', (req, res) => {
  * GET /api/source/current
  */
 app.get("/api/source/current", (req, res) => {
-	try {
-		const source = sourceManager.getCurrentSource();
-		res.json({ success: true, source });
-	} catch (error) {
-		res.status(500).json({ success: false, error: error.message });
-	}
+  try {
+    const source = sourceManager.getCurrentSource();
+    res.json({ success: true, source });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * 检查是否已有可用音源
+ * GET /api/source/status
+ */
+app.get("/api/source/status", (req, res) => {
+  try {
+    const hasSource = sourceManager.hasAvailableSource();
+    const current = sourceManager.getCurrentSource();
+    const candidates = sourceManager.getCandidateSources();
+    
+    res.json({ 
+      success: true, 
+      hasSource,
+      currentSource: current,
+      candidateCount: candidates.length
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 /**
@@ -562,45 +581,37 @@ app.get("/api/source/current", (req, res) => {
  * GET /api/source/search?q=xxx
  */
 app.get("/api/source/search", async (req, res) => {
-	try {
-		const { q } = req.query;
-		if (!q) {
-			return res.status(400).json({ success: false, error: "Missing search query" });
-		}
+  try {
+    const { q } = req.query;
+    if (!q) {
+      return res.status(400).json({ success: false, error: "Missing search query" });
+    }
 
-		// 获取当前音源
-		let currentSource = sourceManager.getCurrentSource();
-		
-		// 如果没有保存的音源，先测试
-		if (!currentSource) {
-			console.log("[Source] No saved source, testing...");
-			const results = await sourceManager.testAndRankSources(q);
-			if (results.length > 0) {
-				currentSource = results[0].sourceInfo;
-				sourceManager.saveSource(currentSource);
-				onlineApi.setSource(currentSource);
-			}
-		}
+    if (!sourceManager.hasAvailableSource()) {
+      return res.json({ 
+        success: false, 
+        needFetch: true,
+        message: "请先点击'智能获取音源'按钮获取可用音源"
+      });
+    }
 
-		// 确保 OnlineMusicApi 使用的是当前音源
-		onlineApi.setSource(currentSource);
-
-		// 使用当前音源搜索
-		let results = await onlineApi.search(q);
-		
-		// 批量探测搜索结果的duration，标记试听/完整
-		if (Array.isArray(results) && results.length > 0) {
-			results = sourceManager.probeSearchResults(results, 15);
-		}
-		
-		res.json({ 
-			success: true, 
-			source: currentSource,
-			results 
-		});
-	} catch (error) {
-		res.json({ success: false, error: error.message });
-	}
+    const currentSource = sourceManager.getCurrentSource();
+    onlineApi.setSource(currentSource);
+    
+    let results = await onlineApi.search(q);
+    
+    if (Array.isArray(results) && results.length > 0) {
+      results = sourceManager.probeSearchResults(results, 10);
+    }
+    
+    res.json({ 
+      success: true, 
+      source: currentSource, 
+      results 
+    });
+  } catch (error) {
+    res.json({ success: false, error: error.message });
+  }
 });
 
 // ==================== 旧的智能音源搜索（保留兼容） ====================
@@ -777,32 +788,34 @@ const PORT = config.server.port || 3000;
 
 // 处理端口占用错误
 server.on("error", (err) => {
-	if (err.code === "EADDRINUSE") {
-		console.error(`[Server] Port ${PORT} is already in use. Is another instance running?`);
-		console.error(`[Server] Try: lsof -i :${PORT} or kill existing process`);
-		process.exit(1);
-	} else {
-		console.error("[Server] Error:", err.message);
-		throw err;
-	}
+  if (err.code === "EADDRINUSE") {
+    console.error(
+      `[Server] Port ${PORT} is already in use. Is another instance running?`,
+    );
+    console.error(`[Server] Try: lsof -i :${PORT} or kill existing process`);
+    process.exit(1);
+  } else {
+    console.error("[Server] Error:", err.message);
+    throw err;
+  }
 });
 
 // 处理 WebSocket 服务器错误
 wss.on("error", (err) => {
-	console.error("[WS] WebSocket Server error:", err.message);
+  console.error("[WS] WebSocket Server error:", err.message);
 });
 
 server.listen(PORT, () => {
-	console.log(`=================================`);
-	console.log(` Web Audio Streamer v2.0`);
-	console.log(`=================================`);
-	console.log(` Server: http://localhost:${PORT}`);
-	console.log(` Music Dir: ${config.music.path}`);
-	console.log(` ESP32: ${config.esp32.host}:${config.esp32.port}`);
-	console.log(
-		` Audio: ${config.audio.sampleRate}Hz / ${config.audio.bitsPerSample}bit`,
-	);
-	console.log(`=================================`);
+  console.log(`=================================`);
+  console.log(` Web Audio Streamer v2.0`);
+  console.log(`=================================`);
+  console.log(` Server: http://localhost:${PORT}`);
+  console.log(` Music Dir: ${config.music.path}`);
+  console.log(` ESP32: ${config.esp32.host}:${config.esp32.port}`);
+  console.log(
+    ` Audio: ${config.audio.sampleRate}Hz / ${config.audio.bitsPerSample}bit`,
+  );
+  console.log(`=================================`);
 });
 
 process.on("SIGINT", () => {
@@ -815,10 +828,10 @@ process.on("SIGINT", () => {
 
 // 处理未捕获的异常
 process.on("uncaughtException", (err) => {
-	console.error("[Server] Uncaught Exception:", err.message);
-	console.error(err.stack);
+  console.error("[Server] Uncaught Exception:", err.message);
+  console.error(err.stack);
 });
 
 process.on("unhandledRejection", (reason, promise) => {
-	console.error("[Server] Unhandled Rejection:", reason);
+  console.error("[Server] Unhandled Rejection:", reason);
 });
