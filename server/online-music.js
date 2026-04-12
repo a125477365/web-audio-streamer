@@ -73,9 +73,9 @@ export class OnlineMusicApi {
       const base = this._getBaseUrl();
       // 兼容不同落雪/音乐 API 的常见参数形式
       let url;
-			if (this.source?.name === 'injahow-meting') {
+			if (this.source?.name?.toLowerCase() === 'injahow meting') {
 				url = `${base}?type=search&id=${encodeURIComponent(query)}`;
-			} else if (this.source?.name === 'bugpk') {
+			} else if (this.source?.name?.toLowerCase() === 'bugpk music') {
 				url = `${base}?media=${this.provider}&type=search&id=${encodeURIComponent(query)}`;
 			} else {
 				// 默认按 nuoxian 风格
@@ -169,9 +169,9 @@ export class OnlineMusicApi {
       const base = this._getBaseUrl();
 			// 非 nuoxian 类 API 可能不需要 auth
 			let url;
-			if (this.source?.name === 'injahow-meting') {
+			if (this.source?.name?.toLowerCase() === 'injahow meting') {
 				url = `${base}?type=url&id=${id}`;
-			} else if (this.source?.name === 'bugpk') {
+			} else if (this.source?.name?.toLowerCase() === 'bugpk music') {
 				url = `${base}?media=${this.provider}&type=url&id=${id}`;
 			} else {
 				const auth = this._generateAuth(id, 'url');
@@ -232,9 +232,9 @@ export class OnlineMusicApi {
     try {
       const base = this._getBaseUrl();
 			let url;
-			if (this.source?.name === 'injahow-meting') {
+			if (this.source?.name?.toLowerCase() === 'injahow meting') {
 				url = `${base}?type=lrc&id=${id}`;
-			} else if (this.source?.name === 'bugpk') {
+			} else if (this.source?.name?.toLowerCase() === 'bugpk music') {
 				url = `${base}?media=${this.provider}&type=lrc&id=${id}`;
 			} else {
 				const auth = this._generateAuth(id, 'lrc');

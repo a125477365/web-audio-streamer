@@ -83,46 +83,88 @@ export class SourceManager {
    * 返回最多6个非试听的可用源
    */
   async fetchSources(testSong = "周杰伦") {
-    console.log("[SourceManager] === 开始智能获取音源（Agent 全流程）===");
+console.log("[SourceManager] === 开始智能获取音源（Agent 全流程）===");
 
-    const agentOutput = await this._callAgent(testSong);
-    const sources = this._parseAgentOutput(agentOutput);
+// 已知可用的音乐 API（作为 Agent 搜索的补充）
+const knownSources = [
+  {
+    name: "落雪音乐 API",
+    searchUrl: "https://api.nxvav.cn/api/music/",
+    description: "支持网易云、QQ、酷狗、酷我、百度等平台搜索，可获取完整歌曲",
+    platforms: ["netease", "tencent", "kugou", "baidu", "kuwo"]
+  }
+];
 
-    if (!sources || sources.length === 0) {
-      // Agent 没找到源
-      const errorReason = this._extractError(agentOutput);
-      throw new Error(errorReason || "Agent 未找到任何可用音源");
-    }
+// 尝试调用 Agent 搜索
+let agentSources = [];
+try {
+  const agentOutput = await this._callAgent(testSong);
+  agentSources = this._parseAgentOutput(agentOutput) || [];
+  console.log("[SourceManager] Agent found", agentSources.length, "sources");
+} catch (e) {
+  console.log("[SourceManager] Agent search failed:", e.message);
+}
 
-    // 验证每个源都有有效的 searchUrl（排除 GitHub 等非 API URL）
-    const validSources = sources.filter(
-      (s) =>
-        s &&
-        s.searchUrl &&
-        s.searchUrl.startsWith("http") &&
-        !s.searchUrl.includes("github.com"),
-    );
+// 合并：Agent 找到的 + 已知的（去重）
+const allSources = [...agentSources];
+for (const known of knownSources) {
+  if (!allSources.find(s => s.searchUrl === known.searchUrl)) {
+    allSources.push(known);
+  }
+}
+
+// Agent 已经在返回前测试过了，直接使用返回的音源
+// 只需要补充已知音源（如果 Agent 没有返回任何音源）
+console.log("[SourceManager] Agent returned", allSources.length, "tested sources");
+const sources = allSources;
+
+if (!sources || sources.length === 0) {
+throw new Error("Agent 未找到任何通过测试的可用音源。请稍后重试或检查网络连接。");
+}
+
+    // 验证每个源都有有效的 searchUrl
+    // 排除：GitHub链接、workers.dev临时域名、已知的不可用域名
+    const validSources = sources.filter((s) => {
+      if (!s || !s.searchUrl || !s.searchUrl.startsWith("http")) return false;
+      const url = s.searchUrl.toLowerCase();
+      // 排除GitHub
+      if (url.includes("github.com")) return false;
+      // 排除临时workers域名（通常不稳定）
+      if (url.includes("workers.dev")) return false;
+      // 排除已知的不可用域名
+      const blockedDomains = ["musicapi.x007.workers.dev", "example.com"];
+      if (blockedDomains.some(d => url.includes(d))) return false;
+      // 排除文档链接（通常不是API endpoint）
+      if (url.includes("/docs") || url.includes("/doc") || url.includes("/documentation")) return false;
+      // 允许的域名模式（放宽限制）
+      const allowedPatterns = [
+        /api./,           // api.nxvav.cn, api.injahow.cn 等
+        /music./,         // music.163.com 等
+        /netease./,       // 网易云相关
+        /qq./,            // QQ音乐相关
+        /kuwo./,          // 酷我相关
+        /kugou./,         // 酷狗相关
+        /migu./,          // 咪咕相关
+        /y.qq.com/,      // QQ音乐
+        /theaudiodb.com/, // TheAudioDB
+        /last.fm/,        // Last.fm
+        /deezer.com/,     // Deezer
+        /spotify.com/,    // Spotify
+        /soundcloud.com/, // SoundCloud
+        /musicbrainz.org/, // MusicBrainz
+        /.cn$/,           // 国内域名
+        /.com$/,          // 通用域名
+        /.org$/           // 通用域名
+      ];
+      // 必须匹配至少一个允许模式
+      return allowedPatterns.some(p => p.test(url));
+    });
 
     if (validSources.length === 0) {
-			// Agent 没找到有效源，使用预定义的后备源
-			console.log("[SourceManager] Agent returned no valid APIs, using fallback sources");
-			const fallbacks = this._getFallbackSources();
-			console.log("[SourceManager] Testing", fallbacks.length, "fallback sources...");
-			const tested = await this._testSources(fallbacks, testSong);
-			if (tested.length === 0) {
-				throw new Error("所有音源均不可用，请稍后重试");
-			}
-			this.config = this.config || {};
-			this.config.candidates = tested.slice(0, 6);
-			this.config.lastFetchAt = new Date().toISOString();
-			this.config.fetchTestSong = testSong;
-			this.config.version = 5;
-			this.saveConfig(this.config);
-			if (!this.config.selectedSource) {
-				this.selectSource(tested[0]);
-			}
-			console.log("[SourceManager] Using", tested.length, "fallback sources:", tested.map(s => s.name));
-			return tested;
+			// Agent 没找到有效源，直接报错
+			console.log("[SourceManager] Agent returned no valid APIs");
+			const errorReason = this._extractError(agentOutput);
+			throw new Error(errorReason || "Agent 未找到任何可用的音乐API。请稍后重试，或检查网络连接。");
 		}
 
     // 限制最多6个
@@ -154,32 +196,47 @@ export class SourceManager {
    * 调用 OpenClaw Agent
    * Agent 负责搜索、测试、筛选试听源
    */
-  
-	_getFallbackSources() {
-		return [
-			{ name: "落雪音乐 API", searchUrl: "https://api.nxvav.cn/api/music/", description: "落雪音乐API，多平台支持" },
-			{ name: "Injahow Meting", searchUrl: "https://api.injahow.cn/meting/", description: "Meting API，多平台" },
-			{ name: "BugPK Music", searchUrl: "https://api.paugram.com/netease/", description: "网易云音乐搜索" }
-		];
-	}
-
 	_callAgent(testSong) {
     return new Promise((resolve) => {
       console.log("[SourceManager] Calling OpenClaw Agent...");
 
       const prompt = [
-	"搜索免费音乐API。",
-	"输出格式:",
-	">>>MUSIC_SOURCES_START<<<",
-	"[{\"name\":\"API名\",\"searchUrl\":\"https://xxx\",\"description\":\"描述\"}]",
-	">>>MUSIC_SOURCES_END<<<",
+"你是一个音乐API专家。请搜索并测试2024-2025年可用的免费音乐搜索API。",
+"",
+"=== 第一步：搜索音乐API ===",
+"搜索免费音乐搜索API，要求：",
+"1. 必须是可直接调用的HTTP API endpoint（不是文档页面、不是GitHub仓库）",
+"2. 必须支持搜索功能（输入歌名返回歌曲列表）",
+"3. 返回JSON格式数据",
+"",
+"排除以下类型的URL：",
+"- GitHub.com（代码仓库）",
+"- 文档页面（包含 /doc、/docs、readme 等）",
+"- workers.dev 等临时域名",
+"",
+"=== 第二步：测试每个API ===",
+"对于找到的每个API，你需要测试：",
+"1. 调用搜索接口（搜索 '" + testSong + "'）",
+"2. 检查是否返回有效的歌曲列表",
+"3. 获取前3个结果的播放链接",
+"4. 使用系统命令测试每个播放链接的时长：",
+"   ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"播放链接\"",
+"5. 只保留能获取完整歌曲（时长 > 90秒）的API",
+"",
+"=== 第三步：返回测试结果 ===",
+"只返回通过测试的API，输出格式：",
+">>>MUSIC_SOURCES_START<<<",
+"[{\"name\":\"API名称\",\"searchUrl\":\"https://实际API地址\",\"description\":\"简短描述\",\"resultCount\":搜索结果数,\"maxDuration\":最大时长秒数}]",
+">>>MUSIC_SOURCES_END<<<",
+"",
+"重要：只返回通过测试的API，未通过测试的不要返回。"
 ].join("\n");
 const sessionId = "music-source-fetch-" + Date.now();
 
       // 不使用 --json，让 stdout 直接是 Agent 的文本回复
       const proc = spawn(
         "openclaw",
-        ["agent", "--session-id", sessionId, "--timeout", "300", "-m", prompt],
+        ["agent", "--local", "--session-id", sessionId, "--timeout", "300", "-m", prompt],
         { cwd: process.cwd(), env: process.env },
       );
 
@@ -217,13 +274,28 @@ const sessionId = "music-source-fetch-" + Date.now();
     });
   }
 
+
+  /**
+   * 过滤 ANSI 颜色代码和调试信息
+   */
+  _filterAgentOutput(text) {
+    if (!text) return '';
+    // 移除 ANSI 颜色代码
+    let filtered = text.replace(/\x1b\[[0-9;]*m/g, '');
+    // 移除常见的调试前缀
+    filtered = filtered.replace(/^\[\d+m/g, '');
+    filtered = filtered.replace(/^\[\d+;\d+m/g, '');
+    // 移除空行
+    filtered = filtered.replace(/^\s*\n/gm, '');
+    return filtered;
+  }
   /**
    * 解析 Agent 输出，提取 JSON 音源列表
    */
   _parseAgentOutput(output) {
     if (!output?.stdout) return null;
 
-    const text = output.stdout;
+    const text = this._filterAgentOutput(output.stdout);
 
     // 方法1: 使用标记提取（最可靠）
     const markerMatch = text.match(
@@ -329,6 +401,114 @@ const sessionId = "music-source-fetch-" + Date.now();
         (output.stderr ? " - " + output.stderr.slice(0, 200) : "")
       );
     return null;
+  }
+
+
+  /**
+   * 测试单个音源：搜索 + 探测 duration
+   */
+  async _testSource(source, testSong) {
+    const result = { success: false, hasFullSong: false, resultCount: 0, maxDuration: 0, error: null };
+    
+    try {
+      // 1. 构造搜索 URL
+      let searchUrl;
+      const encodedSong = encodeURIComponent(testSong);
+      const provider = 'netease';
+      
+      if (source.searchUrl.includes('injahow') || source.searchUrl.includes('meting')) {
+        // Injahow Meting 不支持搜索，跳过
+        result.error = '不支持搜索功能';
+        return result;
+      } else if (source.searchUrl.includes('bugpk')) {
+        searchUrl = `${source.searchUrl}?media=${provider}&type=search&id=${encodedSong}`;
+      } else {
+        // 默认按落雪音乐 API 格式
+        searchUrl = `${source.searchUrl}?server=${provider}&type=search&id=${encodedSong}`;
+      }
+      
+      // 2. 发起搜索请求
+      const response = await this._fetchUrl(searchUrl);
+      
+      if (!Array.isArray(response) || response.length === 0) {
+        result.error = '搜索无结果';
+        return result;
+      }
+      
+      result.resultCount = response.length;
+      
+      // 3. 探测前 3 个结果的 duration
+      const toProbe = response.slice(0, 3);
+      let maxDuration = 0;
+      let hasFullSong = false;
+      
+      for (const item of toProbe) {
+        const playUrl = item.url || item.playUrl;
+        if (!playUrl) continue;
+        
+        const duration = this._probeDuration(playUrl);
+        if (duration && duration > maxDuration) {
+          maxDuration = duration;
+        }
+        if (duration && duration > 90) {
+          hasFullSong = true;
+        }
+      }
+      
+      result.maxDuration = maxDuration;
+      result.hasFullSong = hasFullSong;
+      result.success = true;
+      
+    } catch (e) {
+      result.error = e.message;
+    }
+    
+    return result;
+  }
+  
+  /**
+   * HTTP 请求封装
+   */
+  _fetchUrl(url, maxRedirects = 5) {
+    return new Promise((resolve, reject) => {
+      if (maxRedirects <= 0) {
+        reject(new Error('Too many redirects'));
+        return;
+      }
+      
+      const parsedUrl = new URL(url);
+      const lib = parsedUrl.protocol === 'https:' ? https : http;
+      const options = {
+        headers: {
+          'Accept': '*/*',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        timeout: 15000
+      };
+      
+      lib.get(url, options, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const location = res.headers.location;
+          const newUrl = location.startsWith('http') ? location : new URL(location, parsedUrl.origin).href;
+          resolve(this._fetchUrl(newUrl, maxRedirects - 1));
+          return;
+        }
+        
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            resolve(data);
+          }
+        });
+      }).on('error', (err) => {
+        reject(err);
+      }).on('timeout', () => {
+        reject(new Error('Request timeout'));
+      });
+    });
   }
 
   /**

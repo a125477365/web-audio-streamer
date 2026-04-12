@@ -443,7 +443,9 @@
           return favorites.value.some(function(f) {
             return (f.id && f.id === track.value.id) || (f.path && f.path === track.value.path) || (f.title === track.value.title && f.artist === track.value.artist);
           });
-          apiGet('/source/candidates').then(function(res) { if (res.success && res.results) candidates.value = res.results; });
+        });
+        var hasSource = computed(function() {
+          return !!currentSource.value && !!currentSource.value.searchUrl;
         });
 
         // === API ===
@@ -490,6 +492,14 @@
             }
           });
         }
+        // === Auto fetch on first install ===
+        function autoFetchIfNeeded() {
+          if (!hasSource.value && !fetchingSources.value) {
+            console.log('[Auto] No source found, auto-fetching...');
+            doFetchSources();
+          }
+        }
+
 
 
         // === Local ===
@@ -521,7 +531,11 @@
         // === Online Search (uses saved source) ===
         function doSearch() {
           if (!searchQ.value) return;
-          if (!hasSource.value && !fetchingSources.value) { doFetchSources(); return; }
+          // If no source, auto-fetch
+          if (!hasSource.value && !fetchingSources.value) {
+            doFetchSources();
+            return;
+          }
           searching.value = true; searched.value = false;
           apiGet('/source/search?q=' + encodeURIComponent(searchQ.value)).then(function(res) {
             if (res.success) {
@@ -611,6 +625,8 @@
           var saved = localStorage.getItem('playMode'); if (saved) playMode.value = saved;
           loadCurrentSource();
           apiGet('/local/directories').then(function(res) { if (res.success && res.musicPath) { musicDir.value = res.lastBrowse || res.musicPath; savedDir.value = musicDir.value; doScan(); } });
+          // 首次安装自动获取音源
+          setTimeout(autoFetchIfNeeded, 1000);
         });
         onUnmounted(function() { if (ws) ws.close(); });
 
@@ -624,7 +640,7 @@
           fmPlaying, fmLoading,
           showDirPicker, dirs, dirLoading,
           radios, customRadioUrl,
-				loadCurrentSource, doFetchSources, openSwitchModal, switchTo,
+				loadCurrentSource, doFetchSources, openSwitchModal, switchTo, autoFetchIfNeeded,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
           doSearch, playOnline, toggleSelOnline, playSelectedOnline,
