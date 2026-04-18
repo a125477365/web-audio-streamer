@@ -1,206 +1,119 @@
 /**
- * Hermes API 音源获取模块
+ * Hermes CLI 音源获取模块
  * 
- * 支持两种调用方式：
- * 1. Hermes API Server (优先) - HTTP API 方式
- * 2. OpenClaw CLI (备选) - 命令行方式
- * 
- * 通过 Hermes API Server (OpenAI 兼容接口) 自动获取可靠的音乐源
- * 要求：获取5个可靠优质的非试听洛雪音乐源
+ * 使用 Hermes CLI 方式获取音源（无需 API Key）
+ * 调用 Hermes Agent 的 venv Python 环境执行
  */
 
-import https from 'https';
-import http from 'http';
 import { spawn } from 'child_process';
-import fs from 'fs';
 import path from 'path';
-import os from 'os';
+import fs from 'fs';
 
-// Hermes API Server 配置
-const HERMES_API_URL = process.env.HERMES_API_URL || 'http://127.0.0.1:8642';
-const HERMES_API_KEY = process.env.HERMES_API_KEY || 'hermes-open-webui-2024';
-const HERMES_MODEL = process.env.HERMES_MODEL || 'hermes-agent';
-
-// OpenClaw CLI 配置
-const OPENCLAW_TIMEOUT = parseInt(process.env.OPENCLAW_TIMEOUT || '300000', 10); // 5分钟
+// Hermes CLI 配置
+const HERMES_VENV_PYTHON = process.env.HERMES_VENV_PYTHON || '/opt/hermes/.venv/bin/python3';
+const HERMES_CLI_PATH = process.env.HERMES_CLI_PATH || '/opt/hermes/cli.py';
+const DEFAULT_TIMEOUT = parseInt(process.env.HERMES_CLI_TIMEOUT || '120000', 10); // 2分钟
 
 export class HermesSourceApi {
     constructor(config = {}) {
-        this.apiUrl = config.hermesApiUrl || HERMES_API_URL;
-        this.apiKey = config.hermesApiKey || HERMES_API_KEY;
-        this.model = config.hermesModel || HERMES_MODEL;
-        this.timeout = config.timeout || 120000; // 2分钟超时 (Hermes API)
-        this.openclawTimeout = config.openclawTimeout || OPENCLAW_TIMEOUT;
+        this.venvPython = config.venvPython || HERMES_VENV_PYTHON;
+        this.cliPath = config.cliPath || HERMES_CLI_PATH;
+        this.timeout = config.timeout || DEFAULT_TIMEOUT;
         
-        // 缓存 OpenClaw 是否可用
-        this._openclawAvailable = null;
+        // 检测可用性缓存
+        this._available = null;
     }
 
     /**
-     * 获取音乐源（自动选择最佳方式）
+     * 获取音乐源（使用 Hermes CLI）
      * @param {string} testSong - 测试歌曲名
      * @returns {Promise<Array>} - 返回音源列表
      */
     async fetchMusicSources(testSong = '周杰伦') {
-        console.log('[SourceAPI] 开始获取音乐源...');
+        console.log('[HermesCLI] 开始获取音乐源...');
         
-        // 策略1: 优先尝试 Hermes API Server
-        const hermesAvailable = await this._checkHermesApi();
-        
-        if (hermesAvailable) {
-            console.log('[SourceAPI] 使用 Hermes API Server 获取音源...');
-            try {
-                const sources = await this._fetchViaHermesApi(testSong);
-                if (sources && sources.length > 0) {
-                    console.log(`[SourceAPI] Hermes API 成功获取 ${sources.length} 个音源`);
-                    return sources;
-                }
-            } catch (error) {
-                console.log('[SourceAPI] Hermes API 获取失败:', error.message);
-            }
+        // 检查 CLI 是否可用
+        const available = await this.checkAvailability();
+        if (!available) {
+            throw new Error(`Hermes CLI 不可用。请检查路径: ${this.venvPython} ${this.cliPath}`);
         }
         
-        // 策略2: 备选方案 - OpenClaw CLI
-        const openclawAvailable = await this._checkOpenClawCli();
+        console.log('[HermesCLI] Hermes CLI 可用，开始查询...');
         
-        if (openclawAvailable) {
-            console.log('[SourceAPI] 使用 OpenClaw CLI 获取音源...');
-            try {
-                const sources = await this._fetchViaOpenClaw(testSong);
-                if (sources && sources.length > 0) {
-                    console.log(`[SourceAPI] OpenClaw CLI 成功获取 ${sources.length} 个音源`);
-                    return sources;
-                }
-            } catch (error) {
-                console.log('[SourceAPI] OpenClaw CLI 获取失败:', error.message);
+        const prompt = this._buildPrompt(testSong);
+        
+        try {
+            const response = await this._callHermesCli(prompt);
+            const sources = this._parseResponse(response);
+            
+            if (sources && sources.length > 0) {
+                console.log(`[HermesCLI] 成功获取 ${sources.length} 个音源`);
+                return sources;
             }
+            
+            throw new Error('Hermes CLI 未返回有效音源');
+        } catch (error) {
+            console.error('[HermesCLI] 获取失败:', error.message);
+            throw error;
         }
-        
-        // 两种方式都失败
-        const hermesStatus = hermesAvailable ? '可用但返回空' : '不可用';
-        const openclawStatus = openclawAvailable ? '可用但返回空' : '未安装';
-        
-        throw new Error(
-            `无法获取音源。Hermes API: ${hermesStatus}, OpenClaw CLI: ${openclawStatus}。` +
-            `请确保 Hermes Agent 正在运行 (端口 8642) 或安装 OpenClaw CLI。`
-        );
     }
 
     /**
-     * 检查 Hermes API 是否可用
+     * 检查 Hermes CLI 是否可用
      */
-    async _checkHermesApi() {
-        try {
-            const url = new URL(`${this.apiUrl}/health`);
-            return new Promise((resolve) => {
-                const lib = url.protocol === 'https:' ? https : http;
-                const req = lib.get(url, { timeout: 5000 }, (res) => {
-                    resolve(res.statusCode === 200);
-                });
-                req.on('error', () => resolve(false));
-                req.on('timeout', () => { req.destroy(); resolve(false); });
-            });
-        } catch {
+    async checkAvailability() {
+        if (this._available !== null) {
+            return this._available;
+        }
+        
+        // 检查 Python 解释器是否存在
+        if (!fs.existsSync(this.venvPython)) {
+            console.log(`[HermesCLI] Python 不存在: ${this.venvPython}`);
+            this._available = false;
             return false;
         }
-    }
-
-    /**
-     * 检查 OpenClaw CLI 是否可用
-     */
-    async _checkOpenClawCli() {
-        if (this._openclawAvailable !== null) {
-            return this._openclawAvailable;
+        
+        // 检查 CLI 脚本是否存在
+        if (!fs.existsSync(this.cliPath)) {
+            console.log(`[HermesCLI] CLI 脚本不存在: ${this.cliPath}`);
+            this._available = false;
+            return false;
         }
         
+        // 尝试运行 --help 验证
         return new Promise((resolve) => {
-            const proc = spawn('openclaw', ['--version'], { 
-                timeout: 5000,
-                shell: true 
+            const proc = spawn(this.venvPython, [this.cliPath, '--help'], {
+                timeout: 10000,
+                stdio: ['ignore', 'pipe', 'pipe']
             });
             
-            let stdout = '';
-            proc.stdout.on('data', (d) => { stdout += d; });
+            let completed = false;
+            
             proc.on('close', (code) => {
-                this._openclawAvailable = code === 0;
-                resolve(this._openclawAvailable);
+                if (!completed) {
+                    completed = true;
+                    this._available = code === 0;
+                    resolve(this._available);
+                }
             });
+            
             proc.on('error', () => {
-                this._openclawAvailable = false;
-                resolve(false);
-            });
-        });
-    }
-
-    /**
-     * 通过 Hermes API Server 获取音源
-     */
-    async _fetchViaHermesApi(testSong) {
-        console.log('[HermesAPI] 开始通过 Hermes API 获取音乐源...');
-        
-        const prompt = this._buildPrompt(testSong);
-        
-        const response = await this._callHermesApi(prompt);
-        const sources = this._parseResponse(response);
-        
-        if (sources && sources.length > 0) {
-            return sources;
-        }
-        
-        throw new Error('Hermes API 未返回有效音源');
-    }
-
-    /**
-     * 通过 OpenClaw CLI 获取音源
-     */
-    async _fetchViaOpenClaw(testSong) {
-        console.log('[OpenClawCLI] 开始通过 OpenClaw CLI 获取音乐源...');
-        
-        const prompt = this._buildPrompt(testSong);
-        const sessionId = 'music-source-fetch-' + Date.now();
-        
-        return new Promise((resolve, reject) => {
-            const proc = spawn(
-                'openclaw',
-                ['agent', '--local', '--session-id', sessionId, '--timeout', '300', '-m', prompt],
-                { 
-                    cwd: process.cwd(), 
-                    env: process.env,
-                    shell: true
+                if (!completed) {
+                    completed = true;
+                    this._available = false;
+                    resolve(false);
                 }
-            );
-            
-            let stdout = '';
-            let stderr = '';
-            
-            proc.stdout.on('data', (d) => { stdout += d; });
-            proc.stderr.on('data', (d) => { stderr += d; });
-            
-            proc.on('close', (code) => {
-                console.log('[OpenClawCLI] Exit code:', code);
-                if (stderr) console.log('[OpenClawCLI] Stderr:', stderr.slice(0, 500));
-                
-                if (code === 0) {
-                    const sources = this._parseResponse(stdout);
-                    if (sources && sources.length > 0) {
-                        resolve(sources);
-                    } else {
-                        reject(new Error('OpenClaw CLI 未返回有效音源'));
-                    }
-                } else {
-                    reject(new Error(`OpenClaw CLI 退出码: ${code}`));
-                }
-            });
-            
-            proc.on('error', (e) => {
-                reject(new Error(`OpenClaw CLI 启动失败: ${e.message}`));
             });
             
             // 超时保护
             setTimeout(() => {
-                try { proc.kill(); } catch {}
-                reject(new Error('OpenClaw CLI 执行超时'));
-            }, this.openclawTimeout);
+                if (!completed) {
+                    completed = true;
+                    try { proc.kill(); } catch {}
+                    this._available = false;
+                    resolve(false);
+                }
+            }, 10000);
         });
     }
 
@@ -252,70 +165,83 @@ export class HermesSourceApi {
     }
 
     /**
-     * 调用 Hermes API (OpenAI 兼容格式)
+     * 调用 Hermes CLI
      */
-    async _callHermesApi(prompt) {
+    _callHermesCli(prompt) {
         return new Promise((resolve, reject) => {
-            const url = new URL(`${this.apiUrl}/v1/chat/completions`);
-            const lib = url.protocol === 'https:' ? https : http;
+            console.log('[HermesCLI] 正在调用 Hermes Agent...');
             
-            const data = JSON.stringify({
-                model: this.model,
-                messages: [
-                    { role: 'system', content: '你是一个专业的音乐API测试专家，擅长搜索和测试各种音乐API的可用性。' },
-                    { role: 'user', content: prompt }
-                ],
-                temperature: 0.3,
-                max_tokens: 4000
+            const proc = spawn(this.venvPython, [
+                this.cliPath,
+                '--query', prompt,
+                '--toolsets', 'web,browser,terminal'  // 启用必要工具
+            ], {
+                timeout: this.timeout,
+                env: { ...process.env },
+                stdio: ['ignore', 'pipe', 'pipe']
             });
-
-            const options = {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${this.apiKey}`
-                },
-                timeout: this.timeout
-            };
-
-            const req = lib.request(url, options, (res) => {
-                let body = '';
-                res.on('data', chunk => body += chunk);
-                res.on('end', () => {
-                    if (res.statusCode !== 200) {
-                        reject(new Error(`Hermes API error: ${res.statusCode} - ${body}`));
-                        return;
-                    }
-                    try {
-                        const json = JSON.parse(body);
-                        const content = json.choices?.[0]?.message?.content || '';
-                        resolve(content);
-                    } catch (e) {
-                        reject(new Error(`Failed to parse Hermes response: ${e.message}`));
-                    }
-                });
+            
+            let stdout = '';
+            let stderr = '';
+            
+            proc.stdout.on('data', (data) => {
+                stdout += data.toString();
             });
-
-            req.on('error', reject);
-            req.on('timeout', () => {
-                req.destroy();
-                reject(new Error('Hermes API request timeout'));
+            
+            proc.stderr.on('data', (data) => {
+                stderr += data.toString();
             });
-            req.write(data);
-            req.end();
+            
+            let completed = false;
+            
+            proc.on('close', (code) => {
+                if (completed) return;
+                completed = true;
+                
+                console.log('[HermesCLI] Exit code:', code);
+                
+                if (code === 0) {
+                    resolve(stdout);
+                } else {
+                    const errorMsg = stderr.slice(0, 500) || `Exit code: ${code}`;
+                    reject(new Error(`Hermes CLI 失败: ${errorMsg}`));
+                }
+            });
+            
+            proc.on('error', (err) => {
+                if (completed) return;
+                completed = true;
+                reject(new Error(`Hermes CLI 启动失败: ${err.message}`));
+            });
+            
+            // 超时保护
+            setTimeout(() => {
+                if (completed) return;
+                completed = true;
+                try { proc.kill(); } catch {}
+                reject(new Error('Hermes CLI 执行超时'));
+            }, this.timeout);
         });
     }
 
     /**
-     * 解析响应（支持 Hermes API 和 OpenClaw CLI 的输出）
+     * 解析响应
      */
     _parseResponse(response) {
         if (!response) return null;
 
-        console.log('[SourceAPI] 解析响应...');
+        console.log('[HermesCLI] 解析响应...');
         
-        // 过滤 ANSI 颜色代码（OpenClaw CLI 输出可能包含）
-        let text = response.replace(/\x1b\[[0-9;]*m/g, '');
+        // 过滤 ANSI 颜色代码和进度条
+        let text = response
+            .replace(/\x1b\[[0-9;]*m/g, '')  // ANSI 颜色
+            .replace(/\x1b\].*?\x07/g, '')    // OSC 序列
+            .replace(/╭.*?╮/gs, '')            // 边框
+            .replace(/│.*?│/g, '')             // 侧边栏
+            .replace(/├.*?┤/g, '')             // 分隔线
+            .replace(/╰.*?╯/gs, '')            // 底部边框
+            .replace(/^[─━═]+$/gm, '')         // 水平线
+            .replace(/\(and \d+ more toolsets?\.\.\.\)/g, '');
         
         // 方法1: 提取 JSON 代码块
         const jsonBlockMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
@@ -326,14 +252,13 @@ export class HermesSourceApi {
                     return this._validateAndCleanSources(parsed);
                 }
             } catch (e) {
-                console.log('[SourceAPI] JSON block parse failed:', e.message);
+                console.log('[HermesCLI] JSON block parse failed:', e.message);
             }
         }
-
-        // 方法2: 查找 JSON 数组
+        
+        // 方法2: 查找 JSON 数组（从后往前找）
         const jsonMatches = text.match(/\[[\s\S]*?\]/g);
         if (jsonMatches) {
-            // 从后往前找最大的有效 JSON 数组
             for (let i = jsonMatches.length - 1; i >= 0; i--) {
                 try {
                     const parsed = JSON.parse(jsonMatches[i]);
@@ -346,19 +271,20 @@ export class HermesSourceApi {
                 } catch {}
             }
         }
-
+        
         // 方法3: 提取 URL
         const urls = [];
         const urlPattern = /"(?:searchUrl|url)":\s*"(https?:\/\/[^"]+)"/g;
         let match;
         const seen = new Set();
+        
         while ((match = urlPattern.exec(text)) !== null) {
             if (!seen.has(match[1]) && !match[1].includes('github.com')) {
                 seen.add(match[1]);
                 urls.push({
                     name: 'Discovered API',
                     searchUrl: match[1],
-                    description: '通过 API 搜索发现',
+                    description: '通过 Hermes CLI 发现',
                     tested: true
                 });
             }
@@ -367,8 +293,8 @@ export class HermesSourceApi {
         if (urls.length > 0) {
             return this._validateAndCleanSources(urls);
         }
-
-        console.log('[SourceAPI] 无法解析响应');
+        
+        console.log('[HermesCLI] 无法解析响应');
         return null;
     }
 
@@ -395,13 +321,6 @@ export class HermesSourceApi {
                 tested: s.tested !== false
             }))
             .slice(0, 5); // 最多返回5个
-    }
-
-    /**
-     * 检查可用性（兼容旧接口）
-     */
-    async checkAvailability() {
-        return await this._checkHermesApi() || await this._checkOpenClawCli();
     }
 }
 
