@@ -178,9 +178,9 @@
           <template v-if="tab === 'online'">
             <div class="search-box">
               <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch">
-              <button class="btn btn-primary" @click="doSearch" :disabled="searching">🔍 {{ searching ? '搜索中...' : '搜索' }}</button>
-              <button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? 'Agent搜索中...' : '智能获取音源' }}</button>
-              <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换音源</button>
+<button class="btn btn-primary" @click="doSearch" :disabled="searching">🔍 {{ searching ? '搜索中...' : '搜索' }}</button>
+<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中...' : '获取音源(Hermes)' }}</button>
+<button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换音源</button>
             </div>
             <div class="source-badge" v-if="currentSource">
               <div><span style="color:#4CAF50;">✓</span> 当前音源: <b>{{ currentSource.name }}</b> <span v-if="currentSource.aiScore" style="color:#888;">(AI评分: {{ currentSource.aiScore }})</span></div>
@@ -208,7 +208,7 @@
               </li>
             </ul>
             <div class="empty-state" v-else-if="searched"><div class="empty-icon">🔍</div><div class="empty-text">没有找到结果</div></div>
-            <div class="empty-state" v-else><div class="empty-icon">🌐</div><div class="empty-text">搜索在线音乐</div><div class="empty-hint" v-if="!currentSource">请先点击 "智能获取音源" 获取可用音源</div></div>
+            <div class="empty-state" v-else><div class="empty-icon">🌐</div><div class="empty-text">搜索在线音乐</div><div class="empty-hint" v-if="!currentSource">首次安装将自动通过 Hermes API 获取音源</div></div>
           </template>
 
           <!-- 私人FM -->
@@ -253,11 +253,11 @@
             <div style="height:14px;"></div>
 
             <div style="background:#1a1a2e;padding:20px;border-radius:12px;border:1px solid #2a2a4a;">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
-                <div style="font-weight:600;">🎯 音源设置</div>
-                <button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '搜索中...' : '智能获取音源' }}</button>
-                <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换</button>
-              </div>
+<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
+<div style="font-weight:600;">🎯 音源设置</div>
+<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中...' : '获取音源(Hermes)' }}</button>
+<button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换</button>
+</div>
 
               <div v-if="currentSource" style="padding:10px 12px;border:1px solid #2a2a4a;border-radius:10px;background:#151526;margin-bottom:12px;">
                 <div style="font-size:13px;">
@@ -267,13 +267,13 @@
                 </div>
                 <div style="font-size:12px;color:#666;margin-top:4px;">{{ currentSource.description || '' }}</div>
               </div>
-              <div v-else style="font-size:13px;color:#666;margin-bottom:12px;">当前未选择音源，请点击「智能获取音源」。</div>
+              <div v-else style="font-size:13px;color:#666;margin-bottom:12px;">当前未选择音源，首次搜索时将自动通过 Hermes API 获取。</div>
 
               <div style="font-size:12px;color:#888;margin-bottom:8px;">
                 <span>已获取的候选音源（点击可直接切换）</span>
               </div>
 
-              <div v-if="candidates.length === 0" style="font-size:13px;color:#666;">暂无候选音源，请先点击「智能获取音源」。</div>
+              <div v-if="candidates.length === 0" style="font-size:13px;color:#666;">暂无候选音源，请点击「获取音源(Hermes)」或直接搜索歌曲自动获取。</div>
 
               <div v-for="(s, i) in candidates" :key="s.searchUrl || i"
                    class="source-card"

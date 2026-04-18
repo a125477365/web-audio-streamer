@@ -25,14 +25,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // 加载配置
 const configPath =
-  process.env.CONFIG_PATH || path.join(__dirname, "../config/config.json");
+ process.env.CONFIG_PATH || path.join(__dirname, "../config/config.json");
 const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 
 // 确保 music 目录存在
 const musicDir = path.resolve(__dirname, "../music");
 if (!fs.existsSync(musicDir)) {
-  fs.mkdirSync(musicDir, { recursive: true });
-  console.log("[Server] Created music directory:", musicDir);
+ fs.mkdirSync(musicDir, { recursive: true });
+ console.log("[Server] Created music directory:", musicDir);
 }
 config.music.path = musicDir;
 
@@ -56,16 +56,31 @@ const recommender = new RecommendationEngine(config);
 const smartSourceFinder = new SmartSourceFinder(config);
 const sourceManager = new SourceManager();
 
-// 启动时注入已保存的音源，确保重启后搜索立即生效
-try {
-  const saved = sourceManager.getCurrentSource();
-  if (saved) {
-    onlineApi.setSource(saved);
-    console.log("[Source] Loaded saved source on boot:", saved.name);
-  }
-} catch (e) {
-  console.warn("[Source] Failed to load saved source on boot:", e.message);
-}
+// 首次安装自动获取音源
+(async () => {
+    try {
+        // 检查是否为首次安装
+        if (sourceManager.isFirstInstall()) {
+            console.log("[Source] 首次安装，自动通过 Hermes API 获取音源...");
+            const sources = await sourceManager.fetchSources("周杰伦");
+            if (sources && sources.length > 0) {
+                const firstSource = sources[0];
+                onlineApi.setSource(firstSource);
+                console.log("[Source] 首次安装自动选择音源:", firstSource.name);
+            }
+        } else {
+            // 非首次安装，加载已保存的音源
+            const saved = sourceManager.getCurrentSource();
+            if (saved) {
+                onlineApi.setSource(saved);
+                console.log("[Source] Loaded saved source:", saved.name);
+            }
+        }
+    } catch (e) {
+        console.warn("[Source] 自动获取音源失败:", e.message);
+        console.warn("[Source] 请手动点击「智能获取音源」按钮");
+    }
+})();
 
 // ==================== 本地音乐 API ====================
 
@@ -323,29 +338,81 @@ app.get("/api/local/play", async (req, res) => {
 
 /**
  * 搜索歌曲
+ * 如果搜索失败，自动通过 Hermes API 重新获取音源
  */
 app.get("/api/online/search", async (req, res) => {
-  try {
-    const { q, type = "song" } = req.query;
-    if (!q) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing search query" });
-    }
-    const results = await onlineApi.search(q, type);
-    // 检查是否返回了错误提示
-    if (results && results.success === false) {
-      return res.json(results);
-    }
-    res.json({ success: true, results });
-  } catch (error) {
-    res.json({
-      success: false,
-      error: error.message,
-      hint: "请把以下内容发给 OpenClaw 进行修复：",
-      fixMessage: "Web Audio Streamer 搜索失败，请自动帮我修复。",
-    });
-  }
+ try {
+ const { q, type = "song" } = req.query;
+ if (!q) {
+ return res
+ .status(400)
+ .json({ success: false, error: "Missing search query" });
+ }
+
+ // 检查是否有可用音源
+ if (!sourceManager.hasAvailableSource()) {
+ console.log("[Search] 无可用音源，自动获取中...");
+ const sources = await sourceManager.fetchSources(q);
+ if (sources && sources.length > 0) {
+ const firstSource = sources[0];
+ onlineApi.setSource(firstSource);
+ console.log("[Search] 自动选择音源:", firstSource.name);
+ }
+ }
+
+ let results;
+ let searchError = null;
+
+ try {
+ results = await onlineApi.search(q, type);
+ } catch (err) {
+ searchError = err;
+ console.log("[Search] 搜索失败:", err.message);
+ }
+
+ // 如果搜索失败或结果为空，尝试重新获取音源后再搜索一次
+ if (searchError || (Array.isArray(results) && results.length === 0)) {
+ console.log("[Search] 搜索失败或无结果，重新获取音源后重试...");
+ 
+ try {
+ const sources = await sourceManager.refreshSourcesOnFailure(q);
+ if (sources && sources.length > 0) {
+ const firstSource = sources[0];
+ onlineApi.setSource(firstSource);
+ console.log("[Search] 重新获取音源:", firstSource.name);
+ 
+ // 重新搜索
+ results = await onlineApi.search(q, type);
+ searchError = null;
+ }
+ } catch (refreshErr) {
+ console.log("[Search] 重新获取音源失败:", refreshErr.message);
+ }
+ }
+
+ // 返回结果
+ if (searchError) {
+ return res.json({
+ success: false,
+ error: searchError.message,
+ hint: "搜索失败，已尝试重新获取音源",
+ });
+ }
+
+ // 检查是否返回了错误提示
+ if (results && results.success === false) {
+ return res.json(results);
+ }
+
+ res.json({ success: true, results });
+ } catch (error) {
+ res.json({
+ success: false,
+ error: error.message,
+ hint: "请把以下内容发给管理员：",
+ fixMessage: "Web Audio Streamer 搜索失败。",
+ });
+ }
 });
 
 /**
