@@ -698,50 +698,122 @@ app.get("/api/smart-source/config", async (req, res) => {
 // ==================== 控制接口 ====================
 
 app.post("/api/control/stop", (req, res) => {
-  audioStreamer.stop();
-  recommender.stop();
-  res.json({ success: true, message: "Stopped" });
+ audioStreamer.stop();
+ recommender.stop();
+ res.json({ success: true, message: "Stopped" });
 });
 
 app.post("/api/control/pause", (req, res) => {
-  audioStreamer.pause();
-  res.json({ success: true });
+ audioStreamer.pause();
+ res.json({ success: true });
 });
 app.post("/api/control/resume", (req, res) => {
-  audioStreamer.resume();
-  res.json({ success: true });
+ audioStreamer.resume();
+ res.json({ success: true });
 });
 app.post("/api/control/volume", (req, res) => {
-  const { volume } = req.body;
-  if (typeof volume !== "number" || volume < 0 || volume > 100) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Invalid volume (0-100)" });
-  }
-  audioStreamer.setVolume(volume);
-  res.json({ success: true, volume });
+ const { volume } = req.body;
+ if (typeof volume !== "number" || volume < 0 || volume > 100) {
+ return res
+ .status(400)
+ .json({ success: false, error: "Invalid volume (0-100)" });
+ }
+ audioStreamer.setVolume(volume);
+ res.json({ success: true, volume });
 });
 
 app.post("/api/control/seek", async (req, res) => {
-  const { time } = req.body;
-  if (typeof time !== "number" || time < 0) {
-    return res.status(400).json({ success: false, error: "Invalid time" });
-  }
-  try {
-    await audioStreamer.seek(time);
-    res.json({ success: true, time });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+ const { time } = req.body;
+ if (typeof time !== "number" || time < 0) {
+ return res.status(400).json({ success: false, error: "Invalid time" });
+ }
+ try {
+ await audioStreamer.seek(time);
+ res.json({ success: true, time });
+ } catch (err) {
+ res.status(500).json({ success: false, error: err.message });
+ }
+});
+
+/**
+ * 获取完整播放状态
+ * GET /api/control/status
+ */
+app.get("/api/control/status", (req, res) => {
+ const status = audioStreamer.getStatus();
+ const recommendStatus = recommender.getStatus();
+ const currentSource = sourceManager.getCurrentSource();
+ 
+ res.json({
+ success: true,
+ status: {
+ playing: status.playing || false,
+ paused: status.paused || false,
+ volume: status.volume || 100,
+ currentTime: status.currentTime || 0,
+ duration: status.duration || 0,
+ track: status.track || null,
+ recommend: recommendStatus,
+ },
+ source: currentSource,
+ });
+});
+
+/**
+ * 上一曲 (需要配合播放列表使用)
+ * POST /api/control/prev
+ */
+app.post("/api/control/prev", async (req, res) => {
+ try {
+ // 检查是否有推荐播放列表
+ const recommendStatus = recommender.getStatus();
+ if (recommendStatus.running && recommendStatus.currentIndex > 0) {
+ // 如果正在推荐播放，切换到上一首
+ await recommender.prev();
+ return res.json({ success: true, message: "Previous track" });
+ }
+ 
+ // 否则返回错误（需要客户端实现播放列表逻辑）
+ res.json({ 
+ success: false, 
+ error: "No playlist available",
+ hint: "Use recommendation mode for playlist navigation"
+ });
+ } catch (err) {
+ res.status(500).json({ success: false, error: err.message });
+ }
+});
+
+/**
+ * 下一曲
+ * POST /api/control/next
+ */
+app.post("/api/control/next", async (req, res) => {
+ try {
+ // 检查是否有推荐播放列表
+ const recommendStatus = recommender.getStatus();
+ if (recommendStatus.running) {
+ await recommender.next();
+ return res.json({ success: true, message: "Next track" });
+ }
+ 
+ res.json({ 
+ success: false, 
+ error: "No playlist available",
+ hint: "Use recommendation mode for playlist navigation"
+ });
+ } catch (err) {
+ res.status(500).json({ success: false, error: err.message });
+ }
 });
 
 app.get("/api/status", (req, res) => {
-  const status = audioStreamer.getStatus();
-  const recommendStatus = recommender.getStatus();
-  res.json({
-    success: true,
-    status: { ...status, recommend: recommendStatus },
-  });
+ const status = audioStreamer.getStatus();
+ const recommendStatus = recommender.getStatus();
+ res.json({
+ success: true,
+ status: { ...status, recommend: recommendStatus },
+ });
 });
 
 app.post("/api/esp32/target", (req, res) => {

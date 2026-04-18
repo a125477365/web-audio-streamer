@@ -1,12 +1,14 @@
 {
   "name": "web-audio-streamer",
   "version": "1.0.0",
-  "description": "Web-based audio player with ESP32 UDP streaming support",
+  "description": "Web-based audio player with ESP32 UDP streaming support - 双向 Skill for Hermes/OpenClaw",
   "main": "server/index.js",
   "type": "module",
   "scripts": {
     "dev": "node server/index.js",
     "start": "node server/index.js",
+    "start:check": "bash scripts/start.sh",
+    "check-deps": "bash scripts/start.sh --check-only",
     "build:ui": "cd web-ui && npm run build"
   },
   "keywords": ["audio", "streaming", "esp32", "udp", "music-player"],
