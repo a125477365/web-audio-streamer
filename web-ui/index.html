@@ -179,7 +179,7 @@
             <div class="search-box">
               <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch">
 <button class="btn btn-primary" @click="doSearch" :disabled="searching">🔍 {{ searching ? '搜索中...' : '搜索' }}</button>
-<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中...' : '获取音源(Hermes)' }}</button>
+<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中(约2-5分钟)...' : '获取音源' }}</button>
 <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换音源</button>
             </div>
             <div class="source-badge" v-if="currentSource">
@@ -255,7 +255,7 @@
             <div style="background:#1a1a2e;padding:20px;border-radius:12px;border:1px solid #2a2a4a;">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
 <div style="font-weight:600;">🎯 音源设置</div>
-<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中...' : '获取音源(Hermes)' }}</button>
+<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中(约2-5分钟)...' : '获取音源' }}</button>
 <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换</button>
 </div>
 

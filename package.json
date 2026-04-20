@@ -11,15 +11,22 @@
     "check-deps": "bash scripts/start.sh --check-only",
     "build:ui": "cd web-ui && npm run build"
   },
-  "keywords": ["audio", "streaming", "esp32", "udp", "music-player"],
+  "keywords": [
+    "audio",
+    "streaming",
+    "esp32",
+    "udp",
+    "music-player"
+  ],
   "author": "谭坚",
   "license": "MIT",
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.18.2",
-    "ws": "^8.16.0",
     "fluent-ffmpeg": "^2.1.2",
     "music-metadata": "^8.1.4",
-    "cors": "^2.8.5"
+    "node-pty": "^1.1.0",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0"

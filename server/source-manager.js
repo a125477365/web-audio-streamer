@@ -1,10 +1,11 @@
 /**
- * 音源管理器 v6
+ * 音源管理器 v10
  *
  * 核心原则：
- * 1. 首次安装时音源为空，必须通过 Hermes API 自动获取
- * 2. 搜索失败时自动重新获取音源
- * 3. 获取5个可靠优质的非试听洛雪音乐源
+ * 1. 通过 Hermes 实时搜索最新洛雪音源
+ * 2. 使用 setsid 后台执行，支持长时间任务（30分钟超时）
+ * 3. 搜索结果永久保存，用户可切换音源
+ * 4. 获取5个可靠优质的非试听音乐源
  */
 
 import fs from "fs";
@@ -19,11 +20,11 @@ const CONFIG_DIR = path.join(os.homedir(), ".openclaw", "web-audio-streamer");
 const SOURCE_CONFIG_FILE = path.join(CONFIG_DIR, "source-config.json");
 
 export class SourceManager {
-    constructor() {
-        this.config = null;
-        this._ensureConfigDir();
-        this.hermesApi = new HermesSourceApi();
-    }
+ constructor() {
+ this.config = null;
+ this._ensureConfigDir();
+ this.hermesApi = new HermesSourceApi();
+ }
 
     _ensureConfigDir() {
         if (!fs.existsSync(CONFIG_DIR)) {
@@ -94,73 +95,59 @@ export class SourceManager {
         console.log("[SourceManager] User selected:", source.name);
     }
 
-    /**
-     * 通过 Hermes API 获取音源（主要方法）
-     * 返回5个可靠优质的非试听洛雪音乐源
-     */
-    async fetchSources(testSong = "周杰伦") {
-        console.log("[SourceManager] === 开始通过 Hermes API 获取音源 ===");
+ /**
+ * 通过 Hermes CLI 实时搜索音源仓库
+ * 流程：Hermes 搜索 → 返回仓库 URL → GitHub API 获取文件
+ */
+ async fetchSources(testSong = "周杰伦") {
+ console.log("[SourceManager] === 开始实时获取音源 ===");
 
-        // 检查 Hermes API 是否可用
-        const hermesAvailable = await this.hermesApi.checkAvailability();
-        if (!hermesAvailable) {
-            console.log("[SourceManager] Hermes API 不可用，请确保 Hermes Agent 正在运行");
-            throw new Error("Hermes API 不可用。请确保 Hermes Agent 正在运行 (http://127.0.0.1:8642)");
-        }
+ const hermesAvailable = await this.hermesApi.checkAvailability();
+ if (!hermesAvailable) {
+ throw new Error("Hermes CLI 不可用，请确保 Hermes Agent 正在运行");
+ }
 
-        console.log("[SourceManager] Hermes API 可用，开始获取音源...");
+ console.log("[SourceManager] Hermes CLI 可用，开始搜索仓库...");
 
-        try {
-            // 调用 Hermes API 获取音源
-            const sources = await this.hermesApi.fetchMusicSources(testSong);
+ try {
+ const sources = await this.hermesApi.fetchMusicSources();
+ if (sources && sources.length > 0) {
+ return this._saveSources(sources, "hermes-search");
+ }
+ throw new Error("Hermes 未返回有效音源");
+ } catch (error) {
+ console.error("[SourceManager] Hermes 搜索失败:", error.message);
+ throw error;
+ }
+ }
 
-            if (!sources || sources.length === 0) {
-                throw new Error("Hermes API 未返回有效音源");
-            }
+ /**
+ * 保存音源到配置
+ */
+  _saveSources(sources, source) {
+  const validSources = sources.filter(s => {
+    if (!s || !s.searchUrl || !s.searchUrl.startsWith("http")) return false;
+    return true;
+  }).slice(0, 10);
 
-            // 验证每个源
-            const validSources = sources.filter(s => {
-                if (!s || !s.searchUrl || !s.searchUrl.startsWith("http")) return false;
-                const url = s.searchUrl.toLowerCase();
-                if (url.includes("github.com")) return false;
-                if (url.includes("workers.dev")) return false;
-                return true;
-            });
+ if (validSources.length === 0) {
+ throw new Error("没有找到有效的音源");
+ }
 
-            if (validSources.length === 0) {
-                throw new Error("没有找到有效的音源");
-            }
+ this.config = this.config || {};
+ this.config.candidates = validSources;
+ this.config.lastFetchAt = new Date().toISOString();
+ this.config.version = 11;
+ this.config.source = source;
+ this.saveConfig(this.config);
 
-            // 限制最多5个
-            const top5 = validSources.slice(0, 5);
+ if (!this.config.selectedSource) {
+ this.selectSource(validSources[0]);
+ }
 
-            // 永久保存候选列表
-            this.config = this.config || {};
-            this.config.candidates = top5;
-            this.config.lastFetchAt = new Date().toISOString();
-            this.config.fetchTestSong = testSong;
-            this.config.version = 6;
-            this.config.source = 'hermes-api';
-            this.saveConfig(this.config);
-
-            // 如果没有选中音源，自动选中第一个
-            if (!this.config.selectedSource || !this.config.selectedSource.searchUrl) {
-                this.selectSource(top5[0]);
-            }
-
-            console.log(
-                "[SourceManager] === 成功获取",
-                top5.length,
-                "个音源:",
-                top5.map(s => s.name)
-            );
-
-            return top5;
-        } catch (error) {
-            console.error("[SourceManager] Hermes API 获取失败:", error.message);
-            throw error;
-        }
-    }
+ console.log("[SourceManager] === 成功获取", validSources.length, "个音源:", validSources.map(s => s.name));
+ return validSources;
+ }
 
     /**
      * 自动获取音源（用于首次安装和搜索失败时）
