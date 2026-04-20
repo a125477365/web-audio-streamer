@@ -458,8 +458,15 @@ var fetchMessage = ref('');
 
         // === Source Manager ===
         function loadCurrentSource() {
-          apiGet('/source/current').then(function(res) {
-            if (res.success && res.source) currentSource.value = res.source;
+          apiGet('/source/status').then(function(res) {
+            if (!res.success) return;
+            currentSource.value = res.currentSource || null;
+            if (Array.isArray(res.candidates)) candidates.value = res.candidates;
+            if (res.needsSelection && candidates.value.length > 0) showSwitchModal.value = true;
+            if (res.manualActionRequired && res.manualActionMessage) {
+              fetchError.value = res.manualActionMessage;
+              showFetchError.value = true;
+            }
           });
  }
 
@@ -537,6 +544,7 @@ repo: s.repo,
 aiScore: s.aiScore,
 description: s.description
 }));
+currentSource.value = null;
 loadCurrentSource();
 openSwitchModal();
 } else {
@@ -565,17 +573,25 @@ console.error('轮询失败:', err);
         function switchTo(source) {
           apiPost('/source/select', { source: source }).then(function(res) {
             if (res.success) {
-              currentSource.value = source;
+              currentSource.value = res.source || source;
               showSwitchModal.value = false;
             }
           });
         }
         // === Auto fetch on first install ===
         function autoFetchIfNeeded() {
-          if (!hasSource.value && !fetchingSources.value) {
-            console.log('[Auto] No source found, auto-fetching...');
-            doFetchSources();
-          }
+          if (fetchingSources.value) return;
+          apiGet('/source/status').then(function(res) {
+            if (!res.success) return;
+            currentSource.value = res.currentSource || null;
+            if (Array.isArray(res.candidates)) candidates.value = res.candidates;
+            if (res.currentSource) return;
+            if (res.needsSelection && candidates.value.length > 0) {
+              showSwitchModal.value = true;
+              return;
+            }
+            if (!res.hasCandidates) doFetchSources();
+          });
         }
 
 
@@ -609,9 +625,14 @@ console.error('轮询失败:', err);
         // === Online Search (uses saved source) ===
         function doSearch() {
           if (!searchQ.value) return;
-          // If no source, auto-fetch
-          if (!hasSource.value && !fetchingSources.value) {
-            doFetchSources();
+          if (!hasSource.value) {
+            if (candidates.value.length > 0) {
+              showSwitchModal.value = true;
+              return;
+            }
+            if (!fetchingSources.value) {
+              doFetchSources();
+            }
             return;
           }
           searching.value = true; searched.value = false;
@@ -620,6 +641,14 @@ console.error('轮询失败:', err);
               results.value = res.results || [];
               searched.value = true; selOnline.value = [];
               if (res.source && !currentSource.value) currentSource.value = res.source;
+            } else if (res.needSelect && Array.isArray(res.candidates)) {
+              candidates.value = res.candidates;
+              showSwitchModal.value = true;
+            } else if (res.needFetch && !fetchingSources.value) {
+              doFetchSources();
+            } else if (res.needRefresh) {
+              fetchError.value = res.message || 'Selected source is no longer usable.';
+              showFetchError.value = true;
             }
           }).finally(function() { searching.value = false; });
         }

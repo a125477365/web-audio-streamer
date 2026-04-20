@@ -57,6 +57,7 @@ const recommender = new RecommendationEngine(config);
 const smartSourceFinder = new SmartSourceFinder(config);
 const sourceManager = new SourceManager();
 const hermesSourceApi = new HermesSourceApi();
+sourceManager.isFirstInstall = () => false;
 
 // 首次安装自动获取音源
 (async () => {
@@ -660,8 +661,8 @@ app.post("/api/source/select", async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing source info" });
     }
     
-    sourceManager.selectSource(source);
-    onlineApi.setSource(source);
+    const selected = sourceManager.selectSource(source);
+    onlineApi.setSource(selected);
     
     res.json({ 
       success: true, 
@@ -692,15 +693,11 @@ app.get("/api/source/current", (req, res) => {
  */
 app.get("/api/source/status", (req, res) => {
   try {
-    const hasSource = sourceManager.hasAvailableSource();
-    const current = sourceManager.getCurrentSource();
-    const candidates = sourceManager.getCandidates();
+    const status = sourceManager.getStatus();
     
     res.json({ 
       success: true, 
-      hasSource,
-      currentSource: current,
-      candidateCount: candidates.length
+      ...status
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -718,7 +715,21 @@ app.get("/api/source/search", async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing search query" });
     }
 
+    if (!sourceManager.hasCandidates()) {
+      return res.json({ 
+        success: false, 
+        needFetch: true,
+        message: "No realtime-discovered source list found. Run source discovery first."
+      });
+    }
+
     if (!sourceManager.hasAvailableSource()) {
+      return res.json({
+        success: false,
+        needSelect: true,
+        candidates: sourceManager.getCandidates(),
+        message: "Please choose one of the discovered sources before searching."
+      });
       return res.json({ 
         success: false, 
         needFetch: true,
@@ -730,11 +741,22 @@ app.get("/api/source/search", async (req, res) => {
     onlineApi.setSource(currentSource);
     
     let results = await onlineApi.search(q);
+    if (results && results.success === false) {
+      return res.json(results);
+    }
     
     if (Array.isArray(results) && results.length > 0) {
       results = sourceManager.probeSearchResults(results, 10);
     }
     
+    if (Array.isArray(results) && results.length === 0) {
+      return res.json({
+        success: false,
+        needRefresh: true,
+        message: "The selected source returned no playable results. Refresh the source list and choose again."
+      });
+    }
+
     res.json({ 
       success: true, 
       source: currentSource, 

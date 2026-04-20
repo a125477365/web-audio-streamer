@@ -1,319 +1,275 @@
-/**
- * 在线音乐 API（多源支持）
- *
- * 使用 nuoxian API 获取完整歌曲
- * 支持网易云、QQ音乐、酷狗等平台
- */
-import https from 'https';
-import http from 'http';
-import crypto from 'crypto';
+import https from "https";
+import http from "http";
+import crypto from "crypto";
 
-// 音质等级定义（数值越高音质越好）
 const QUALITY_RANK = {
-  'hires': 100,    // Hi-Res 无损
-  'flac': 90,      // FLAC 无损
-  'ape': 85,       // APE 无损
-  'wav': 80,       // WAV 无损
-  'sq': 70,        // 超高音质 (320kbps)
-  '320': 70,       // 320kbps
-  '320kbps': 70,
-  'hq': 50,        // 高音质 (192kbps)
-  '192': 50,       // 192kbps
-  'standard': 30,  // 标准音质 (128kbps)
-  '128': 30,       // 128kbps
-  'low': 10        // 低音质
+  hires: 100,
+  flac: 90,
+  ape: 85,
+  wav: 80,
+  sq: 70,
+  320: 70,
+  "320kbps": 70,
+  hq: 50,
+  192: 50,
+  standard: 30,
+  128: 30,
+  low: 10,
 };
 
-// 默认 API（兜底）
-const DEFAULT_API = 'https://api.nxvav.cn/api/music/';
-const NXVAV_TOKEN = 'nxvav'; // nuoxian 的公共 token（仅用于该类 API 的 auth 生成）
+const NXVAV_TOKEN = "nxvav";
 
 export class OnlineMusicApi {
   constructor(config) {
     this.config = config;
-    this.provider = config.online?.provider || 'netease';
-		// 当前音源（可由 SourceManager 选择后注入）
-		this.source = {
-			name: 'default',
-			searchUrl: DEFAULT_API,
-			format: 'json',
-			needsAuth: false,
-      requestStyle: 'server',
-		};
+    this.provider = config.online?.provider || "netease";
+    this.source = null;
   }
 
-	/**
-	 * 设置当前音源（会影响后续 search/getSongUrl 等）
-	 */
-	setSource(source) {
-		if (source && source.searchUrl) {
-			this.source = { ...this.source, ...source };
-		}
-	}
+  setSource(source) {
+    this.source = source && source.searchUrl ? { ...source } : null;
+  }
 
-	/**
-	 * 获取当前 baseUrl
-	 */
-	_getBaseUrl() {
-		return this.source?.searchUrl || DEFAULT_API;
-	}
+  _requireSource() {
+    if (!this.source?.searchUrl) {
+      throw new Error("No music source selected");
+    }
+    return this.source;
+  }
+
+  _getBaseUrl() {
+    return this._requireSource().searchUrl;
+  }
 
   _getRequestStyle() {
-    return this.source?.requestStyle || 'server';
+    return this.source?.requestStyle || "server";
   }
 
   _buildApiUrl(action, value, auth) {
     const base = this._getBaseUrl();
     const style = this._getRequestStyle();
 
-    if (style === 'server-keyword') {
-      if (action === 'search') {
+    if (style === "server-keyword") {
+      if (action === "search") {
         return `${base}?server=${this.provider}&type=search&id=0&keyword=${encodeURIComponent(value)}`;
       }
-      return `${base}?server=${this.provider}&type=${action}&id=${encodeURIComponent(value)}${auth ? `&auth=${auth}` : ''}`;
+      return `${base}?server=${this.provider}&type=${action}&id=${encodeURIComponent(value)}${auth ? `&auth=${auth}` : ""}`;
     }
 
-    if (style === 'media') {
+    if (style === "media") {
       return `${base}?media=${this.provider}&type=${action}&id=${encodeURIComponent(value)}`;
     }
 
-    if (style === 'type-only') {
+    if (style === "type-only") {
       return `${base}?type=${action}&id=${encodeURIComponent(value)}`;
     }
 
-    if (style === 'q') {
-      if (action !== 'search') {
+    if (style === "q") {
+      if (action !== "search") {
         return null;
       }
       return `${base}?q=${encodeURIComponent(value)}`;
     }
 
-    if (style === 'keyword') {
-      if (action !== 'search') {
+    if (style === "keyword") {
+      if (action !== "search") {
         return null;
       }
       return `${base}?keyword=${encodeURIComponent(value)}`;
     }
 
-    const authQuery = auth ? `&auth=${auth}` : '';
+    const authQuery = auth ? `&auth=${auth}` : "";
     return `${base}?server=${this.provider}&type=${action}&id=${encodeURIComponent(value)}${authQuery}`;
   }
 
-  /**
-   * 生成认证 token (HMAC-SHA1)
-   */
-  _generateAuth(id, type = 'url') {
+  _generateAuth(id, type = "url") {
     const message = `${this.provider}${type}${id}`;
-    return crypto.createHmac('sha1', NXVAV_TOKEN).update(message).digest('hex');
+    return crypto.createHmac("sha1", NXVAV_TOKEN).update(message).digest("hex");
   }
 
-  /**
-   * 搜索歌曲
-   */
-  async search(query, type = 'song') {
+  async search(query) {
     try {
-      const url = this._buildApiUrl('search', query);
+      this._requireSource();
+      const url = this._buildApiUrl("search", query);
       if (!url) {
-        throw new Error('当前音源不支持搜索');
+        throw new Error("Selected source does not support search");
       }
-      const data = await this._fetchWithRedirect(url);
 
+      const data = await this._fetchWithRedirect(url);
       if (!Array.isArray(data)) {
         return {
           success: false,
-          error: '搜索异常',
-          hint: '请把以下内容发给 OpenClaw 进行修复：',
-          fixMessage: 'Web Audio Streamer 搜索失败，请自动帮我修复。'
+          error: "Search returned an unexpected payload",
         };
       }
 
-      // 处理搜索结果（尽量兼容多种返回结构）
       const songs = data.map((item, index) => {
-        // 从 URL 中提取歌曲 ID（nuoxian 等）
         const idMatch = item.url?.match(/id=(\d+)/);
         const id = item.id || (idMatch ? idMatch[1] : `unknown_${index}`);
 
         return {
           id,
-          title: item.title || item.name || '未知',
-          artist: item.author || item.artist || '未知',
-          album: item.album || '',
-          cover: item.pic || item.cover || '',
-          playUrl: item.url || item.playUrl || '',
-          // 可选信息：有些源会带这些字段
+          title: item.title || item.name || "Unknown",
+          artist: item.author || item.artist || "Unknown",
+          album: item.album || "",
+          cover: item.pic || item.cover || "",
+          playUrl: item.url || item.playUrl || "",
           duration: item.duration || item.time || null,
           size: item.size || null,
-          sizeText: item.sizeText || (item.size ? `${Math.round(item.size / 1024 / 1024 * 10) / 10}MB` : '未知'),
+          sizeText: item.sizeText || (item.size ? `${Math.round((item.size / 1024 / 1024) * 10) / 10}MB` : "Unknown"),
           sampleRate: item.sampleRate || null,
           bitsPerSample: item.bitsPerSample || null,
           channels: item.channels || null,
-          bitrate: item.bitrate || '未知',
+          bitrate: item.bitrate || "Unknown",
           qualityScore: item.qualityScore || 50,
         };
       });
 
-			// 过滤试听/短片段（尽量不让搜索结果出现 45 秒试听）
-			// 规则：如果有 duration 且明显 < 90 秒，则认为是试听
-			const filtered = songs.filter((s) => {
-				if (!s.duration) return true;
-				const sec = s.duration > 10000 ? s.duration / 1000 : s.duration;
-				return !(sec > 0 && sec < 90);
-			});
-
-			return filtered;
+      return songs.filter((song) => {
+        if (!song.duration) {
+          return true;
+        }
+        const seconds = song.duration > 10000 ? song.duration / 1000 : song.duration;
+        return !(seconds > 0 && seconds < 90);
+      });
     } catch (error) {
       return {
         success: false,
         error: error.message,
-        hint: '请把以下内容发给 OpenClaw 进行修复：',
-        fixMessage: 'Web Audio Streamer 搜索失败，请自动帮我修复。'
       };
     }
   }
 
-  /**
-   * 获取歌曲详情
-   */
   async getSongDetail(id) {
     try {
-      const url = this._buildApiUrl('song', id);
-      if (!url) return null;
-      const data = await this._fetchWithRedirect(url);
+      this._requireSource();
+      const url = this._buildApiUrl("song", id);
+      if (!url) {
+        return null;
+      }
 
+      const data = await this._fetchWithRedirect(url);
       if (data && data.title) {
         return {
-          id: id,
+          id,
           title: data.title,
-          artist: data.author || '未知',
-          album: data.album || '',
-          cover: data.pic || '',
-          url: data.url
+          artist: data.author || "Unknown",
+          album: data.album || "",
+          cover: data.pic || "",
+          url: data.url,
         };
       }
-    } catch (error) {
-      // 忽略错误，返回基本信息
-    }
+    } catch {}
+
     return null;
   }
 
-  /**
-   * 获取歌曲播放链接
-   */
   async getSongUrl(id) {
     try {
-      const auth = this.source?.needsAuth ? this._generateAuth(id, 'url') : null;
-      const url = this._buildApiUrl('url', id, auth);
+      this._requireSource();
+      const auth = this.source?.needsAuth ? this._generateAuth(id, "url") : null;
+      const url = this._buildApiUrl("url", id, auth);
       if (!url) {
-        throw new Error('当前音源不支持获取播放链接');
+        throw new Error("Selected source does not support playback URL lookup");
       }
 
-      // 获取重定向后的真实音频链接
-      const realUrl = await this._getRedirectUrl(url);
-      return realUrl;
+      return await this._getRedirectUrl(url);
     } catch (error) {
-      throw new Error('Unable to get song URL: ' + error.message);
+      throw new Error(`Unable to get song URL: ${error.message}`);
     }
   }
 
-  /**
-   * 获取重定向后的真实 URL
-   */
   _getRedirectUrl(url, maxRedirects = 5) {
     return new Promise((resolve, reject) => {
       if (maxRedirects <= 0) {
-        reject(new Error('Too many redirects'));
+        reject(new Error("Too many redirects"));
         return;
       }
 
       const parsedUrl = new URL(url);
-      const lib = parsedUrl.protocol === 'https:' ? https : http;
-
-      const options = {
-        method: 'GET',
-        timeout: 10000
-      };
+      const lib = parsedUrl.protocol === "https:" ? https : http;
+      const options = { method: "GET", timeout: 10000 };
 
       const req = lib.request(url, options, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          const location = res.headers.location;
-          const newUrl = location.startsWith('http') ? location : new URL(location, parsedUrl.origin).href;
-          resolve(this._getRedirectUrl(newUrl, maxRedirects - 1));
-        } else if (res.statusCode === 200) {
-          resolve(url);
-        } else {
-          reject(new Error(`HTTP ${res.statusCode}`));
+          const nextUrl = res.headers.location.startsWith("http")
+            ? res.headers.location
+            : new URL(res.headers.location, parsedUrl.origin).href;
+          resolve(this._getRedirectUrl(nextUrl, maxRedirects - 1));
+          return;
         }
+
+        if (res.statusCode === 200) {
+          resolve(url);
+          return;
+        }
+
+        reject(new Error(`HTTP ${res.statusCode}`));
       });
 
-      req.on('error', reject);
-      req.on('timeout', () => {
+      req.on("error", reject);
+      req.on("timeout", () => {
         req.destroy();
-        reject(new Error('Request timeout'));
+        reject(new Error("Request timeout"));
       });
       req.end();
     });
   }
 
-  /**
-   * 获取歌词
-   */
   async getLyric(id) {
     try {
-      const auth = this.source?.needsAuth ? this._generateAuth(id, 'lrc') : null;
-      const url = this._buildApiUrl('lrc', id, auth);
-      if (!url) return '';
-      const data = await this._fetchWithRedirect(url);
-      return data;
-    } catch (error) {
-      return '';
+      this._requireSource();
+      const auth = this.source?.needsAuth ? this._generateAuth(id, "lrc") : null;
+      const url = this._buildApiUrl("lrc", id, auth);
+      if (!url) {
+        return "";
+      }
+      return await this._fetchWithRedirect(url);
+    } catch {
+      return "";
     }
   }
 
-  /**
-   * HTTP 请求封装（支持重定向）
-   */
   _fetchWithRedirect(url, maxRedirects = 5) {
     return new Promise((resolve, reject) => {
       if (maxRedirects <= 0) {
-        reject(new Error('Too many redirects'));
+        reject(new Error("Too many redirects"));
         return;
       }
 
       const parsedUrl = new URL(url);
-      const lib = parsedUrl.protocol === 'https:' ? https : http;
-
+      const lib = parsedUrl.protocol === "https:" ? https : http;
       const options = {
         headers: {
-          'Accept': '*/*',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          Accept: "*/*",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         },
-        timeout: 15000
+        timeout: 15000,
       };
 
-      lib.get(url, options, (res) => {
-        // 处理重定向
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          const location = res.headers.location;
-          const newUrl = location.startsWith('http') ? location : new URL(location, parsedUrl.origin).href;
-          resolve(this._fetchWithRedirect(newUrl, maxRedirects - 1));
-          return;
-        }
-
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(data);
-            resolve(json);
-          } catch (e) {
-            resolve(data);
+      lib
+        .get(url, options, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            const nextUrl = res.headers.location.startsWith("http")
+              ? res.headers.location
+              : new URL(res.headers.location, parsedUrl.origin).href;
+            resolve(this._fetchWithRedirect(nextUrl, maxRedirects - 1));
+            return;
           }
-        });
-      }).on('error', (err) => {
-        reject(err);
-      });
+
+          let data = "";
+          res.on("data", (chunk) => {
+            data += chunk;
+          });
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(data));
+            } catch {
+              resolve(data);
+            }
+          });
+        })
+        .on("error", reject);
     });
   }
 }

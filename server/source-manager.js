@@ -1,23 +1,12 @@
-/**
- * 音源管理器 v11
- *
- * 核心原则：
- * 1. 通过 Hermes 实时搜索最新洛雪音源
- * 2. 异步启动任务，前端轮询进度
- * 3. 搜索结果永久保存，用户可切换音源
- * 4. 获取5个可靠优质的非试听音乐源
- */
-
 import fs from "fs";
-import path from "path";
 import os from "os";
-import https from "https";
-import http from "http";
-import { spawn, execSync } from "child_process";
+import path from "path";
+import { execSync } from "child_process";
 import { HermesSourceApi } from "./hermes-source-api.js";
 
 const CONFIG_DIR = path.join(os.homedir(), ".openclaw", "web-audio-streamer");
 const SOURCE_CONFIG_FILE = path.join(CONFIG_DIR, "source-config.json");
+const CONFIG_VERSION = 12;
 
 export class SourceManager {
   constructor() {
@@ -38,8 +27,8 @@ export class SourceManager {
         this.config = JSON.parse(fs.readFileSync(SOURCE_CONFIG_FILE, "utf-8"));
         return this.config;
       }
-    } catch (e) {
-      console.error("[SourceManager] Failed to load config:", e.message);
+    } catch (error) {
+      console.error("[SourceManager] Failed to load config:", error.message);
     }
     return null;
   }
@@ -48,215 +37,227 @@ export class SourceManager {
     try {
       fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(data, null, 2));
       this.config = data;
-      console.log("[SourceManager] Config saved");
       return true;
-    } catch (e) {
-      console.error("[SourceManager] Failed to save config:", e.message);
+    } catch (error) {
+      console.error("[SourceManager] Failed to save config:", error.message);
       return false;
     }
   }
 
-  /**
-   * 检查是否为首次安装（无音源配置）
-   */
+  _ensureConfigLoaded() {
+    if (!this.config) {
+      this.loadConfig();
+    }
+    if (!this.config) {
+      this.config = {
+        version: CONFIG_VERSION,
+        candidates: [],
+        selectedSource: null,
+      };
+    }
+  }
+
   isFirstInstall() {
-    if (!this.config) this.loadConfig();
-    return !this.config || 
-      !this.config.candidates || 
-      this.config.candidates.length === 0 ||
-      !this.config.selectedSource;
+    this._ensureConfigLoaded();
+    return !Array.isArray(this.config.candidates) || this.config.candidates.length === 0;
   }
 
-  /** 是否已有可用音源 */
+  hasSelectedSource() {
+    this._ensureConfigLoaded();
+    return Boolean(this.config?.selectedSource?.searchUrl);
+  }
+
   hasAvailableSource() {
-    if (!this.config) this.loadConfig();
-    return !!this.config?.selectedSource?.searchUrl;
+    return this.hasSelectedSource();
   }
 
-  /** 获取当前选中的音源 */
+  hasCandidates() {
+    this._ensureConfigLoaded();
+    return Array.isArray(this.config?.candidates) && this.config.candidates.length > 0;
+  }
+
+  needsSelection() {
+    return this.hasCandidates() && !this.hasSelectedSource();
+  }
+
   getCurrentSource() {
-    if (!this.config) this.loadConfig();
+    this._ensureConfigLoaded();
     return this.config?.selectedSource || null;
   }
 
-  /** 获取已保存的候选列表 */
   getCandidates() {
-    if (!this.config) this.loadConfig();
+    this._ensureConfigLoaded();
     return this.config?.candidates || [];
   }
 
-  /** 用户从候选中选择一个源 */
+  getStatus() {
+    this._ensureConfigLoaded();
+    return {
+      hasSource: this.hasSelectedSource(),
+      hasCandidates: this.hasCandidates(),
+      needsFetch: !this.hasCandidates(),
+      needsSelection: this.needsSelection(),
+      currentSource: this.getCurrentSource(),
+      candidates: this.getCandidates(),
+      candidateCount: this.getCandidates().length,
+      lastFetchAt: this.config?.lastFetchAt || null,
+      manualActionRequired: Boolean(this.config?.manualActionRequired),
+      manualActionMessage: this.config?.manualActionMessage || "",
+    };
+  }
+
   selectSource(source) {
-    this.config = this.config || {};
-    this.config.selectedSource = source;
+    this._ensureConfigLoaded();
+    const matched = this.getCandidates().find((item) => item.searchUrl === source.searchUrl) || {
+      ...source,
+      selected: false,
+    };
+
+    this.config.selectedSource = matched;
     this.config.selectedAt = new Date().toISOString();
     this.saveConfig(this.config);
-    console.log("[SourceManager] User selected:", source.name);
+    return matched;
   }
 
-  /**
-   * 启动音源获取任务（异步）
-   * 前端通过 checkFetchProgress() 轮询进度
-   */
-  async startFetch(testSong = "周杰伦") {
-    console.log("[SourceManager] 启动音源获取任务...");
-    return await this.hermesApi.startFetch(testSong);
+  async startFetch(testSong = "Jay Chou") {
+    return this.hermesApi.startFetch(testSong);
   }
 
-  /**
-   * 检查获取进度
-   */
   checkFetchProgress() {
     const progress = this.hermesApi.checkProgress();
-    
-    // 如果成功完成，保存到配置
-    if (progress.status === 'success' && progress.sources?.length > 0) {
+    if (progress.status === "success" && progress.sources?.length > 0) {
       this._saveSourcesFromProgress(progress);
     }
-    
     return progress;
   }
 
-  /**
-   * 从进度结果保存音源
-   */
   _saveSourcesFromProgress(progress) {
-    const sources = progress.sources.map((s, i) => ({
-      id: s.id || `source_${String(i + 1).padStart(3, '0')}`,
-      name: s.name,
-      searchUrl: s.searchUrl || s.url,
-      requestStyle: s.requestStyle,
-      needsAuth: Boolean(s.needsAuth),
-      repo: s.repo,
-      quality: s.quality,
-      stars: s.stars,
-      aiScore: s.aiScore,
-      description: s.description,
-      verifiedAt: s.verifiedAt,
-      selected: false
+    const sources = progress.sources.map((source, index) => ({
+      id: source.id || `source_${String(index + 1).padStart(3, "0")}`,
+      name: source.name,
+      searchUrl: source.searchUrl || source.url,
+      requestStyle: source.requestStyle,
+      needsAuth: Boolean(source.needsAuth),
+      repo: source.repo,
+      aiScore: source.aiScore,
+      description: source.description,
+      verifiedAt: source.verifiedAt,
+      sampleSong: source.sampleSong || null,
+      sampleArtist: source.sampleArtist || null,
+      sampleDurationSec: source.sampleDurationSec || null,
+      samplePlayUrl: source.samplePlayUrl || null,
+      queryCount: source.queryCount || 0,
+      detectedFrom: source.detectedFrom || "",
+      selected: false,
     }));
 
-    this.config = this.config || {};
-    this.config.candidates = sources;
-    this.config.lastFetchAt = progress.timestamp;
-    this.config.version = 11;
+    this._ensureConfigLoaded();
     const previousSelectedUrl = this.config.selectedSource?.searchUrl;
-    const matchedSelection = sources.find((item) => item.searchUrl === previousSelectedUrl);
-    this.config.selectedSource = matchedSelection || sources[0] || null;
-    this.saveConfig(this.config);
+    const matchedSelection = sources.find((item) => item.searchUrl === previousSelectedUrl) || null;
 
-    if (this.config.selectedSource) {
-      this.config.selectedAt = new Date().toISOString();
-      this.saveConfig(this.config);
+    this.config = {
+      ...this.config,
+      version: CONFIG_VERSION,
+      candidates: sources,
+      selectedSource: matchedSelection,
+      lastFetchAt: progress.timestamp || new Date().toISOString(),
+      fetchProvider: progress.provider || progress.result?.provider || null,
+      manualActionRequired: Boolean(progress.manualActionRequired),
+      manualActionMessage: progress.manualActionMessage || "",
+      dependencyStatus: Array.isArray(progress.dependencyStatus) ? progress.dependencyStatus : [],
+    };
+
+    if (!matchedSelection) {
+      delete this.config.selectedAt;
     }
 
-    console.log("[SourceManager] 保存了", sources.length, "个音源");
+    this.saveConfig(this.config);
     return sources;
   }
 
-  /**
-   * 旧版同步获取方法（已弃用，保留兼容）
-   */
-  async fetchSources(testSong = "周杰伦") {
-    console.log("[SourceManager] 使用旧版同步获取方法...");
-    
-    // 启动任务
+  async fetchSources(testSong = "Jay Chou") {
     await this.hermesApi.startFetch(testSong);
-    
-    // 等待完成（最长30分钟，每2分钟检查一次）
-    const maxWait = 1800000;
-    const interval = 120000;
+
+    const maxWait = 30 * 60 * 1000;
+    const interval = 2 * 60 * 1000;
     let waited = 0;
-    
+
     while (waited < maxWait) {
       const progress = this.hermesApi.checkProgress();
-      if (progress.status === 'success') {
+      if (progress.status === "success") {
         return this._saveSourcesFromProgress(progress);
       }
-      if (progress.status === 'error' || progress.status === 'timeout') {
+      if (progress.status === "error" || progress.status === "timeout") {
         throw new Error(progress.message);
       }
-      
-      await new Promise(r => setTimeout(r, interval));
+
+      await new Promise((resolve) => setTimeout(resolve, interval));
       waited += interval;
     }
-    
-    throw new Error("获取超时");
+
+    throw new Error("Source discovery timed out after 30 minutes");
   }
 
-    /**
-     * 自动获取音源（用于首次安装和搜索失败时）
-     * @returns {Promise<boolean>} - 是否成功获取
-     */
-    async autoFetchIfNeeded() {
-        // 检查是否需要自动获取
-        if (!this.isFirstInstall() && this.hasAvailableSource()) {
-            console.log("[SourceManager] 已有可用音源，无需自动获取");
-            return true;
-        }
-
-        console.log("[SourceManager] 首次安装或无可用音源，自动获取中...");
-
-        try {
-            const sources = await this.fetchSources("周杰伦");
-            return sources && sources.length > 0;
-        } catch (error) {
-            console.error("[SourceManager] 自动获取失败:", error.message);
-            return false;
-        }
+  async autoFetchIfNeeded(testSong = "Jay Chou") {
+    if (this.hasCandidates()) {
+      return this.getCandidates();
     }
 
-    /**
-     * 搜索失败时重新获取音源
-     * @param {string} testSong - 测试歌曲
-     * @returns {Promise<Array>} - 新的音源列表
-     */
-    async refreshSourcesOnFailure(testSong = "周杰伦") {
-        console.log("[SourceManager] 搜索失败，重新获取音源...");
+    return this.fetchSources(testSong);
+  }
 
-        // 清空当前配置
-        this.config = this.config || {};
-        this.config.candidates = [];
-        this.config.selectedSource = null;
-        this.saveConfig(this.config);
+  async refreshSourcesOnFailure(testSong = "Jay Chou") {
+    this._ensureConfigLoaded();
+    this.config = {
+      ...this.config,
+      candidates: [],
+      selectedSource: null,
+      manualActionRequired: false,
+      manualActionMessage: "",
+      dependencyStatus: [],
+    };
+    delete this.config.selectedAt;
+    this.saveConfig(this.config);
+    return this.fetchSources(testSong);
+  }
 
-        // 重新获取
-        return await this.fetchSources(testSong);
+  probeSearchResults(items, probeLimit = 10) {
+    const results = [];
+    const toProbe = items.slice(0, probeLimit);
+
+    for (const item of toProbe) {
+      const url = item?.playUrl || item?.url;
+      if (!url) {
+        results.push({ ...item, durationSec: null, isPreview: null });
+        continue;
+      }
+
+      const durationSec = this._probeDuration(url);
+      const isPreview = typeof durationSec === "number" && durationSec > 0 && durationSec < 90;
+      results.push({ ...item, durationSec, isPreview });
     }
 
-    /**
-     * 批量探测搜索结果的 duration（标记试听）
-     */
-    probeSearchResults(items, probeLimit = 10) {
-        const results = [];
-        const toProbe = items.slice(0, probeLimit);
-        for (const item of toProbe) {
-            const url = item?.playUrl || item?.url;
-            if (!url) {
-                results.push({ ...item, durationSec: null, isPreview: null });
-                continue;
-            }
-            const dur = this._probeDuration(url);
-            const isPreview = typeof dur === "number" && dur > 0 && dur < 90;
-            results.push({ ...item, durationSec: dur, isPreview });
-        }
-        for (const item of items.slice(probeLimit)) {
-            results.push({ ...item, durationSec: null, isPreview: null });
-        }
-        return results;
+    for (const item of items.slice(probeLimit)) {
+      results.push({ ...item, durationSec: null, isPreview: null });
     }
 
-    _probeDuration(url) {
-        try {
-            const out = execSync(
-                `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${url}"`,
-                { timeout: 8000, encoding: "utf-8", shell: true },
-            ).trim();
-            const v = parseFloat(out);
-            if (Number.isFinite(v) && v > 0) return v;
-        } catch {}
-        return null;
-    }
+    return results;
+  }
+
+  _probeDuration(url) {
+    try {
+      const output = execSync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${url}"`,
+        { timeout: 8000, encoding: "utf-8", shell: true },
+      ).trim();
+      const value = Number.parseFloat(output);
+      if (Number.isFinite(value) && value > 0) {
+        return value;
+      }
+    } catch {}
+
+    return null;
+  }
 }
 
 export default SourceManager;
