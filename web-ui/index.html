@@ -179,7 +179,8 @@
             <div class="search-box">
               <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch">
 <button class="btn btn-primary" @click="doSearch" :disabled="searching">🔍 {{ searching ? '搜索中...' : '搜索' }}</button>
-<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中(约2-5分钟)...' : '获取音源' }}</button>
+<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? (fetchMessage || '获取中...') : '获取音源' }}</button>
+<span v-if="fetchingSources && fetchProgress > 0" style="margin-left:10px;font-size:12px;color:#aaa;">{{ fetchProgress }}%</span>
 <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换音源</button>
             </div>
             <div class="source-badge" v-if="currentSource">
@@ -389,8 +390,10 @@
         var currentSource = ref(null);
         var showSwitchModal = ref(false);
         var showFetchError = ref(false);
-        var fetchError = ref('');
-        var fetchingSources = ref(false);
+var fetchError = ref('');
+var fetchingSources = ref(false);
+var fetchProgress = ref(0);
+var fetchMessage = ref('');
 			var candidates = ref([]);
 
         // Playlist
@@ -457,27 +460,97 @@
           apiGet('/source/current').then(function(res) {
             if (res.success && res.source) currentSource.value = res.source;
           });
-        }
+ }
 
-			function doFetchSources() {
-          fetchingSources.value = true;
-          fetchError.value = '';
-          showFetchError.value = false;
-          apiPost('/source/fetch', { testSong: searchQ.value || '周杰伦' }).then(function(res) {
-            if (res.success) {
-              candidates.value = res.results || [];
-              if (res.results.length > 0) openSwitchModal();
-            } else {
-              fetchError.value = res.error || '获取音源失败';
-              showFetchError.value = true;
-            }
-          }).catch(function(err) {
-            fetchError.value = err.message || '网络错误';
-            showFetchError.value = true;
-          }).finally(function() { fetchingSources.value = false; });
-        }
+ // 新版获取音源：任务模式 + 前端轮询
+ let currentTaskId = null;
+ let pollInterval = null;
+ let pollCount = 0;
 
-        function openSwitchModal() {
+ function doFetchSources() {
+ fetchingSources.value = true;
+ fetchError.value = '';
+ showFetchError.value = false;
+ fetchProgress.value = 0;
+ fetchMessage.value = '创建任务中...';
+
+ // 1. 创建任务
+ apiPost('/source/task/create').then(function(res) {
+ if (!res.success) throw new Error(res.error || '创建任务失败');
+ 
+ currentTaskId = res.taskId;
+ fetchMessage.value = '任务已创建，正在启动...';
+
+ // 2. 启动任务
+ return apiPost('/source/task/' + currentTaskId + '/start');
+ }).then(function(res) {
+ if (!res.success) throw new Error(res.error || '启动任务失败');
+ 
+ fetchMessage.value = 'Hermes 正在搜索...';
+ pollCount = 0;
+
+ // 3. 开始轮询（每5秒）
+ pollInterval = setInterval(pollTaskStatus, 5000);
+ // 立即查询一次
+ pollTaskStatus();
+
+ }).catch(function(err) {
+ fetchingSources.value = false;
+ fetchError.value = err.message;
+ showFetchError.value = true;
+ });
+ }
+
+ function pollTaskStatus() {
+ if (!currentTaskId) return;
+
+ pollCount++;
+ // 最多轮询 60 次（5分钟）
+ if (pollCount > 60) {
+ clearInterval(pollInterval);
+ fetchingSources.value = false;
+ fetchError.value = '获取超时（5分钟）';
+ showFetchError.value = true;
+ return;
+ }
+
+ apiGet('/source/task/' + currentTaskId + '/status').then(function(res) {
+ if (!res.success) return;
+
+ const task = res.task;
+ fetchProgress.value = task.progress || 0;
+ fetchMessage.value = task.message || '处理中...';
+
+ if (task.status === 'completed') {
+ clearInterval(pollInterval);
+ fetchingSources.value = false;
+
+ // 处理结果
+ const sources = task.result?.sources || [];
+ if (sources.length > 0) {
+ candidates.value = sources.map(s => ({
+ name: s.name,
+ searchUrl: s.url,
+ quality: s.quality,
+ repo: s.repo
+ }));
+ openSwitchModal();
+ } else {
+ fetchError.value = '未找到有效音源';
+ showFetchError.value = true;
+ }
+ } else if (task.status === 'failed' || task.status === 'cancelled') {
+ clearInterval(pollInterval);
+ fetchingSources.value = false;
+ fetchError.value = task.error || '任务失败';
+ showFetchError.value = true;
+ }
+ }).catch(function(err) {
+ console.error('轮询失败:', err);
+ });
+ }
+
+ function openSwitchModal() {
           apiGet('/source/candidates').then(function(res) {
             if (res.success && res.results) candidates.value = res.results;
           });

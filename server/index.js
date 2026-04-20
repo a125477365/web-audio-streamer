@@ -20,6 +20,7 @@ import { MusicDownloader } from "./downloader.js";
 import { RecommendationEngine } from "./recommendation.js";
 import { SmartSourceFinder } from "./smart-source.js";
 import { SourceManager } from "./source-manager.js";
+import { HermesSourceApi } from "./hermes-source-api.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +56,7 @@ const downloader = new MusicDownloader(config);
 const recommender = new RecommendationEngine(config);
 const smartSourceFinder = new SmartSourceFinder(config);
 const sourceManager = new SourceManager();
+const hermesSourceApi = new HermesSourceApi();
 
 // 首次安装自动获取音源
 (async () => {
@@ -549,21 +551,106 @@ app.get("/api/radio/play", async (req, res) => {
 // ==================== 音源管理 ====================
 
 /**
- * 智能获取音源（调用 OpenClaw Agent 联网搜索）
- * POST /api/source/fetch
+ * 音源获取 API（新架构：任务模式）
  */
+
+// 创建获取任务
+app.post("/api/source/task/create", (req, res) => {
+  try {
+    const taskId = hermesSourceApi.createTask();
+    res.json({ success: true, taskId });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 启动任务执行
+app.post("/api/source/task/:taskId/start", async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const task = await hermesSourceApi.startTask(taskId);
+    res.json({ success: true, task });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 获取任务状态（前端轮询）
+app.get("/api/source/task/:taskId/status", (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const task = hermesSourceApi.getTaskStatus(taskId);
+    if (!task) {
+      return res.status(404).json({ success: false, error: "任务不存在" });
+    }
+    res.json({ success: true, task });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 取消任务
+app.post("/api/source/task/:taskId/cancel", (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const task = hermesSourceApi.cancelTask(taskId);
+    res.json({ success: true, task });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 兼容旧接口：直接获取音源（阻塞式）
 app.post("/api/source/fetch", async (req, res) => {
   try {
     const { testSong = "周杰伦" } = req.body;
     console.log('[Source] Agent fetching sources with "' + testSong + '"...');
     
-    const results = await sourceManager.fetchSources(testSong);
+    // 创建并启动任务
+    const taskId = hermesSourceApi.createTask();
+    await hermesSourceApi.startTask(taskId);
     
-    res.json({ 
-      success: true, 
-      results,
-      message: '发现 ' + results.length + ' 个可用音源'
-    });
+    // 等待完成（最多5分钟）
+    const startTime = Date.now();
+    const timeout = 300000;
+    
+    while (Date.now() - startTime < timeout) {
+      const task = hermesSourceApi.getTaskStatus(taskId);
+      if (task.status === 'completed') {
+        const sources = task.result.sources.map(s => ({
+          name: s.name,
+          searchUrl: s.url,
+          quality: s.quality,
+          repo: s.repo
+        }));
+        
+        // 保存到 SourceManager
+        if (sources.length > 0) {
+          sourceManager.saveConfig({
+            candidates: sources,
+            selectedSource: sources[0],
+            lastFetchAt: new Date().toISOString()
+          });
+        }
+        
+        return res.json({
+          success: true,
+          results: sources,
+          message: '发现 ' + sources.length + ' 个可用音源'
+        });
+      }
+      
+      if (task.status === 'failed' || task.status === 'cancelled') {
+        return res.status(500).json({ 
+          success: false, 
+          error: task.error || '任务失败' 
+        });
+      }
+      
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    
+    res.status(500).json({ success: false, error: "获取超时" });
   } catch (error) {
     console.error("[Source] Fetch failed:", error.message);
     res.status(500).json({ success: false, error: error.message });

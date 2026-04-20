@@ -1,316 +1,329 @@
 /**
- * 音源获取模块 v3.0
+ * 音源获取模块 v4.0
  * 
  * 架构：
- * - Prompt 负责所有业务逻辑（搜索、获取、保存、排序）
- * - 代码负责心跳检查（5分钟）+ 通知用户
+ * - 前端发起请求 → 后端创建任务 → 前端轮询进度
+ * - 后端只执行，不发心跳
+ * - 心跳轮询由前端控制
  */
 
 import * as pty from 'node-pty';
 import fs from 'fs';
 import path from 'path';
+import https from 'https';
 
 const HERMES_VENV_PYTHON = process.env.HERMES_VENV_PYTHON || '/opt/hermes/.venv/bin/python3';
 const HERMES_CLI_PATH = process.env.HERMES_CLI_PATH || '/opt/hermes/cli.py';
-const RESULT_FILE = process.env.SOURCE_RESULT_FILE || '/tmp/hermes-source-results.json';
-const CONFIG_FILE = process.env.SOURCE_CONFIG_PATH || path.join(process.env.HOME || '/root', '.openclaw/web-audio-streamer/source-config.json');
+const TASKS_DIR = '/tmp/hermes-source-tasks';
+
+// 任务状态存储
+const tasks = new Map();
 
 export class HermesSourceApi {
   constructor(options = {}) {
     this.venvPython = options.venvPython || HERMES_VENV_PYTHON;
     this.cliPath = options.cliPath || HERMES_CLI_PATH;
-    this.maxTimeout = options.maxTimeout || 1800000; // 30分钟
-    this.heartbeatInterval = options.heartbeatInterval || 300000; // 5分钟
-    this.resultFile = options.resultFile || RESULT_FILE;
-    this.configFile = options.configFile || CONFIG_FILE;
-    this.onProgress = options.onProgress || null; // 进度回调
+    
+    // 确保任务目录存在
+    if (!fs.existsSync(TASKS_DIR)) {
+      fs.mkdirSync(TASKS_DIR, { recursive: true });
+    }
   }
 
   /**
-   * 获取音源列表
+   * 创建获取任务（前端调用）
+   * @returns {string} 任务ID
    */
-  async fetchMusicSources() {
-    console.log('[SourceAPI] 开始获取音源...');
+  createTask() {
+    const taskId = `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const taskFile = path.join(TASKS_DIR, `${taskId}.json`);
+    
+    const task = {
+      id: taskId,
+      status: 'pending', // pending, running, completed, failed
+      progress: 0,
+      message: '任务已创建',
+      result: null,
+      error: null,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null
+    };
+    
+    fs.writeFileSync(taskFile, JSON.stringify(task, null, 2));
+    tasks.set(taskId, task);
+    
+    console.log(`[TaskManager] 创建任务: ${taskId}`);
+    return taskId;
+  }
 
-    // 清理旧结果文件
-    if (fs.existsSync(this.resultFile)) {
-      fs.unlinkSync(this.resultFile);
+  /**
+   * 启动任务执行
+   */
+  async startTask(taskId) {
+    const task = this._loadTask(taskId);
+    if (!task) {
+      throw new Error(`任务不存在: ${taskId}`);
     }
 
-    // 执行交互式搜索
-    const result = await this._interactiveSearch();
-    return result;
+    if (task.status === 'running') {
+      return task; // 已在运行
+    }
+
+    task.status = 'running';
+    task.startedAt = new Date().toISOString();
+    task.message = '正在启动 Hermes...';
+    task.progress = 5;
+    this._saveTask(task);
+
+    // 异步执行，不阻塞
+    this._executeTask(task).catch(err => {
+      task.status = 'failed';
+      task.error = err.message;
+      task.completedAt = new Date().toISOString();
+      this._saveTask(task);
+    });
+
+    return task;
   }
 
   /**
-   * 交互式搜索
-   * - Prompt 包含完整业务逻辑
-   * - 代码只负责心跳和结果检测
+   * 执行任务（异步）
    */
-  async _interactiveSearch() {
-    console.log('[HermesCLI] 启动交互式搜索...');
-    console.log(`[HermesCLI] 心跳间隔: ${this.heartbeatInterval / 60000}分钟`);
-    console.log(`[HermesCLI] 结果文件: ${this.resultFile}`);
+  async _executeTask(task) {
+    const taskId = task.id;
+    
+    // 更新状态：搜索中
+    this._updateTask(taskId, {
+      progress: 10,
+      message: '正在搜索音源仓库...'
+    });
 
-    const prompt = `你是洛雪音乐音源获取助手。请按以下步骤执行：
+    // 构建搜索 prompt
+    const prompt = this._buildSearchPrompt(taskId);
 
-## 第一步：搜索音源仓库
+    // 启动 PTY 进程
+    const proc = pty.spawn(this.venvPython, [
+      this.cliPath,
+      '--toolsets', 'web,browser'
+    ], {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 40,
+      cwd: '/opt/data',
+      env: { ...process.env, TERM: 'xterm-256color' }
+    });
 
-1. 用 browser_navigate 访问 GitHub 搜索：
-   https://github.com/search?q=lx-music-source&type=repositories&s=updated&o=desc
+    let buffer = '';
 
-2. 用 browser_snapshot 获取搜索结果页面
+    // 发送 prompt
+    setTimeout(() => {
+      this._updateTask(taskId, { progress: 15, message: '已发送搜索请求' });
+      proc.write(prompt + '\r');
+    }, 3000);
 
-3. 从结果中提取至少 5 个仓库的信息：
-   - 仓库名（如 Macrohard0001/lx-ikun-music-sources）
-   - 星数
-   - 更新时间
-   - 描述
+    // 接收输出
+    proc.on('data', (data) => {
+      buffer += data.toString();
+      
+      // 检测进度标记
+      if (buffer.includes('第一步完成') || buffer.includes('已找到')) {
+        this._updateTask(taskId, { progress: 40, message: '已找到仓库，正在获取音源文件...' });
+      }
+      if (buffer.includes('第二步完成') || buffer.includes('正在获取')) {
+        this._updateTask(taskId, { progress: 60, message: '正在获取音源文件...' });
+      }
+      if (buffer.includes('第三步完成') || buffer.includes('已保存')) {
+        this._updateTask(taskId, { progress: 80, message: '正在保存结果...' });
+      }
+    });
 
-4. 按以下公式计算评分：
-   score = stars * 0.6 + max(0, 30 - days_ago) * 0.4
-   
-   其中 days_ago 从更新时间推算（如"5 days ago"则为5）
-
-5. 按评分排序，取前 3 个仓库
-
-## 第二步：获取音源文件
-
-对每个选中的仓库：
-1. 用 GitHub API 获取目录结构：
-   GET https://api.github.com/repos/{owner}/{repo}/contents/{path}
-   
-2. 找到版本目录（以 V 或 v 开头，如 V260328），选择最新的
-
-3. 按以下优先级获取 .js 文件：
-   - 优先：优质-支持四平台FLAC/
-   - 其次：良好-支持至少两平台FLAC/
-   - 最后：一般-支持单平台FLAC或多平台320k/
-
-4. 每个仓库最多取 5 个 .js 文件
-
-## 第三步：保存结果
-
-用 write_file 把结果保存到：${this.resultFile}
-
-保存格式（JSON）：
-{
-  "status": "success",
-  "repos_found": 5,
-  "sources": [
-    {
-      "id": "source_001",
-      "name": "念心音源 v1.0.0",
-      "url": "https://raw.githubusercontent.com/Macrohard0001/lx-ikun-music-sources/main/V260328/优质-支持四平台FLAC/念心音源 v1.0.0.js",
-      "repo": "Macrohard0001/lx-ikun-music-sources",
-      "quality": "优质",
-      "stars": 1079
-    },
-    ...
-  ],
-  "total": 10,
-  "selected": 5,
-  "timestamp": "2026-04-20T08:00:00Z"
-}
-
-## 第四步：返回用户选择
-
-保存成功后，输出以下内容让用户选择：
-
-=== 音源获取完成 ===
-找到 {total} 个音源，已选择前 5 个（优质）：
-
-1. [✓] 念心音源 v1.0.0 - 支持四平台FLAC
-2. [✓] 洛雪科技独家音源 - 支持四平台FLAC
-3. [✓] ...
-4. [✓] ...
-5. [✓] ...
-6. [ ] fish-music音源 - 良好
-...
-
-请告诉用户：
-"音源已保存，默认选择前5个优质音源。如需调整，请回复对应编号切换选中状态。"
-
-重要提示：
-- 如果 GitHub API 限流（403），等待几秒后重试
-- 确保下载链接格式正确（raw.githubusercontent.com）
-- 至少返回 5 个有效音源`;
-
+    // 等待完成或超时
     return new Promise((resolve, reject) => {
-      const startTime = Date.now();
-      let buffer = '';
-      let lastHeartbeatTime = startTime;
-      let heartbeatCount = 0;
+      const timeout = setTimeout(() => {
+        proc.kill();
+        reject(new Error('任务超时（30分钟）'));
+      }, 1800000);
 
-      // 启动 Hermes CLI（PTY 模式）
-      const proc = pty.spawn(this.venvPython, [
-        this.cliPath,
-        '--toolsets', 'web,browser'
-      ], {
-        name: 'xterm-256color',
-        cols: 120,
-        rows: 40,
-        cwd: '/opt/data',
-        env: { ...process.env, TERM: 'xterm-256color' }
-      });
-
-      // 等待启动后发送 prompt
-      setTimeout(() => {
-        console.log('[HermesCLI] 发送搜索 prompt...');
-        proc.write(prompt + '\r');
-      }, 5000);
-
-      // 接收输出
-      proc.on('data', (data) => {
-        buffer += data.toString();
-      });
-
-      // 轮询检查结果文件（每30秒）
+      // 定期检查结果文件
       const checkInterval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-        const minutes = Math.floor(elapsed / 60);
-        
-        console.log(`[HermesCLI] 已运行 ${minutes}分钟，检查结果文件...`);
-
-        if (fs.existsSync(this.resultFile)) {
+        const resultFile = this._getResultFile(taskId);
+        if (fs.existsSync(resultFile)) {
           try {
-            const content = fs.readFileSync(this.resultFile, 'utf-8');
+            const content = fs.readFileSync(resultFile, 'utf-8');
             const result = JSON.parse(content);
             
-            if (result.status === 'success' && result.sources && result.sources.length >= 5) {
-              console.log(`[HermesCLI] 发现 ${result.sources.length} 个音源`);
+            if (result.status === 'success' && result.sources?.length >= 5) {
               clearInterval(checkInterval);
-              clearTimeout(timeoutCheck);
+              clearTimeout(timeout);
               proc.kill();
               
-              // 通知用户
-              this._notifyUser(result);
+              this._updateTask(taskId, {
+                status: 'completed',
+                progress: 100,
+                message: `成功获取 ${result.sources.length} 个音源`,
+                result: result,
+                completedAt: new Date().toISOString()
+              });
+              
               resolve(result);
-              return;
             }
           } catch (e) {
-            // 文件内容不完整，继续等待
+            // 文件不完整，继续等待
           }
         }
-
-        // 心跳检查（每5分钟）
-        const timeSinceLastHeartbeat = Date.now() - lastHeartbeatTime;
-        if (timeSinceLastHeartbeat >= this.heartbeatInterval) {
-          heartbeatCount++;
-          lastHeartbeatTime = Date.now();
-          
-          console.log(`[HermesCLI] 发送第 ${heartbeatCount} 次心跳询问...`);
-          proc.write('\r\n[心跳检查] 进度如何？如果已完成，请保存结果到文件并回复"已完成"。\r');
-          
-          // 进度回调
-          if (this.onProgress) {
-            this.onProgress({
-              type: 'heartbeat',
-              count: heartbeatCount,
-              elapsed: minutes
-            });
-          }
-        }
-      }, 30000); // 每30秒检查一次
-
-      // 最大超时
-      const timeoutCheck = setTimeout(() => {
-        clearInterval(checkInterval);
-        proc.kill();
-        
-        // 最后检查一次
-        if (fs.existsSync(this.resultFile)) {
-          try {
-            const content = fs.readFileSync(this.resultFile, 'utf-8');
-            const result = JSON.parse(content);
-            if (result.sources && result.sources.length >= 1) {
-              this._notifyUser(result);
-              resolve(result);
-              return;
-            }
-          } catch (e) {}
-        }
-        
-        reject(new Error(`搜索超时（${this.maxTimeout / 60000}分钟）`));
-      }, this.maxTimeout);
+      }, 5000);
 
       proc.on('close', (code) => {
         clearInterval(checkInterval);
-        clearTimeout(timeoutCheck);
+        clearTimeout(timeout);
         
-        if (fs.existsSync(this.resultFile)) {
+        // 最后检查结果
+        const resultFile = this._getResultFile(taskId);
+        if (fs.existsSync(resultFile)) {
           try {
-            const content = fs.readFileSync(this.resultFile, 'utf-8');
-            const result = JSON.parse(content);
-            if (result.sources && result.sources.length >= 1) {
-              console.log(`[HermesCLI] 进程结束，获取到 ${result.sources.length} 个音源`);
-              this._notifyUser(result);
+            const result = JSON.parse(fs.readFileSync(resultFile, 'utf-8'));
+            if (result.sources?.length >= 1) {
+              this._updateTask(taskId, {
+                status: 'completed',
+                progress: 100,
+                message: `成功获取 ${result.sources.length} 个音源`,
+                result: result,
+                completedAt: new Date().toISOString()
+              });
               resolve(result);
               return;
             }
           } catch (e) {}
         }
         
-        reject(new Error('进程结束但未找到结果'));
+        reject(new Error(`进程异常退出: ${code}`));
       });
 
       proc.on('error', (err) => {
         clearInterval(checkInterval);
-        clearTimeout(timeoutCheck);
-        reject(new Error(`进程启动失败: ${err.message}`));
+        clearTimeout(timeout);
+        reject(err);
       });
     });
   }
 
   /**
-   * 通知用户
+   * 构建搜索 prompt
    */
-  _notifyUser(result) {
-    console.log('\n' + '='.repeat(50));
-    console.log('🎉 音源获取完成！');
-    console.log('='.repeat(50));
-    console.log(`找到 ${result.total || result.sources.length} 个音源`);
-    console.log(`已选择前 ${result.selected || 5} 个优质音源\n`);
+  _buildSearchPrompt(taskId) {
+    const resultFile = this._getResultFile(taskId);
     
-    result.sources.forEach((s, i) => {
-      const selected = i < 5 ? '[✓]' : '[ ]';
-      console.log(`${i + 1}. ${selected} ${s.name} - ${s.quality || '未知质量'}`);
-    });
-    
-    console.log('\n如需调整选择，请回复对应编号切换选中状态。');
-    console.log('='.repeat(50));
+    return `你是洛雪音乐音源获取助手。请按步骤执行：
+
+## 第一步：搜索仓库（进度10%→40%）
+
+1. 用 browser_navigate 访问：
+   https://github.com/search?q=lx-music-source&type=repositories&s=updated&o=desc
+
+2. 用 browser_snapshot 获取搜索结果
+
+3. 提取前5个仓库：仓库名、星数、更新时间
+
+4. 计算评分并排序：
+   score = stars * 0.6 + max(0, 30 - days_ago) * 0.4
+
+找到仓库后输出："第一步完成，已找到X个仓库"
+
+## 第二步：获取音源文件（进度40%→70%）
+
+对每个仓库：
+1. 用 GitHub API 获取最新版本目录
+2. 按优先级获取 .js 文件：优质 > 良好 > 一般
+
+获取时输出："第二步完成，正在获取音源文件"
+
+## 第三步：保存结果（进度70%→100%）
+
+用 write_file 保存到：${resultFile}
+
+格式：
+{
+  "status": "success",
+  "sources": [
+    {"id": "source_001", "name": "音源名", "url": "下载链接", "repo": "仓库", "quality": "优质"}
+  ],
+  "total": 10,
+  "timestamp": "2026-04-20T08:00:00Z"
+}
+
+保存后输出："第三步完成，已保存结果"
+
+重要：
+- 每完成一步输出进度标记
+- 至少返回5个有效音源
+- URL 必须是 raw.githubusercontent.com 格式`;
   }
 
   /**
-   * 获取配置文件路径
+   * 获取任务状态（前端轮询调用）
    */
-  getConfigPath() {
-    return this.configFile;
+  getTaskStatus(taskId) {
+    return this._loadTask(taskId);
   }
 
   /**
-   * 读取当前配置
+   * 取消任务
    */
-  readConfig() {
-    if (fs.existsSync(this.configFile)) {
-      return JSON.parse(fs.readFileSync(this.configFile, 'utf-8'));
+  cancelTask(taskId) {
+    const task = this._loadTask(taskId);
+    if (task && task.status === 'running') {
+      // 标记为取消（实际进程会在下次检查时退出）
+      task.status = 'cancelled';
+      task.message = '任务已取消';
+      task.completedAt = new Date().toISOString();
+      this._saveTask(task);
     }
+    return task;
+  }
+
+  /**
+   * 加载任务
+   */
+  _loadTask(taskId) {
+    if (tasks.has(taskId)) {
+      return tasks.get(taskId);
+    }
+    
+    const taskFile = path.join(TASKS_DIR, `${taskId}.json`);
+    if (fs.existsSync(taskFile)) {
+      const task = JSON.parse(fs.readFileSync(taskFile, 'utf-8'));
+      tasks.set(taskId, task);
+      return task;
+    }
+    
     return null;
   }
 
   /**
-   * 切换音源选中状态
+   * 保存任务
    */
-  toggleSource(sourceId) {
-    const config = this.readConfig();
-    if (!config) return null;
+  _saveTask(task) {
+    const taskFile = path.join(TASKS_DIR, `${task.id}.json`);
+    fs.writeFileSync(taskFile, JSON.stringify(task, null, 2));
+    tasks.set(task.id, task);
+  }
 
-    const source = config.sources.find(s => s.id === sourceId);
-    if (source) {
-      source.selected = !source.selected;
-      fs.writeFileSync(this.configFile, JSON.stringify(config, null, 2));
-      return source;
+  /**
+   * 更新任务状态
+   */
+  _updateTask(taskId, updates) {
+    const task = this._loadTask(taskId);
+    if (task) {
+      Object.assign(task, updates);
+      this._saveTask(task);
     }
-    return null;
+  }
+
+  /**
+   * 获取结果文件路径
+   */
+  _getResultFile(taskId) {
+    return path.join(TASKS_DIR, `${taskId}_result.json`);
   }
 }
