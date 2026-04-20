@@ -154,8 +154,12 @@ export class HermesSourceApi {
     let buffer = '';
 
     // 启动 Hermes CLI（PTY 模式）
+    // 使用支持工具调用的模型
+    const HERMES_MODEL = process.env.HERMES_MODEL || 'gpt-4o-mini';
+    
     const proc = pty.spawn(this.venvPython, [
       this.cliPath,
+      '--model', HERMES_MODEL,
       '--toolsets', 'web,browser'
     ], {
       name: 'xterm-256color',
