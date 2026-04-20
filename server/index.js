@@ -600,6 +600,27 @@ app.post("/api/source/task/:taskId/cancel", (req, res) => {
   }
 });
 
+// 新版接口：启动获取任务（异步）
+app.post("/api/source/fetch/start", async (req, res) => {
+try {
+console.log('[Source] 启动音源获取任务...');
+const result = await sourceManager.startFetch();
+res.json({ success: true, ...result });
+} catch (error) {
+res.status(500).json({ success: false, error: error.message });
+}
+});
+
+// 新版接口：检查获取进度（前端轮询）
+app.get("/api/source/fetch/progress", (req, res) => {
+try {
+const progress = sourceManager.checkFetchProgress();
+res.json({ success: true, progress });
+} catch (error) {
+res.status(500).json({ success: false, error: error.message });
+}
+});
+
 // 兼容旧接口：直接获取音源（阻塞式）
 app.post("/api/source/fetch", async (req, res) => {
   try {

@@ -1,9 +1,9 @@
 /**
- * 音源管理器 v10
+ * 音源管理器 v11
  *
  * 核心原则：
  * 1. 通过 Hermes 实时搜索最新洛雪音源
- * 2. 使用 setsid 后台执行，支持长时间任务（30分钟超时）
+ * 2. 异步启动任务，前端轮询进度
  * 3. 搜索结果永久保存，用户可切换音源
  * 4. 获取5个可靠优质的非试听音乐源
  */
@@ -20,134 +20,159 @@ const CONFIG_DIR = path.join(os.homedir(), ".openclaw", "web-audio-streamer");
 const SOURCE_CONFIG_FILE = path.join(CONFIG_DIR, "source-config.json");
 
 export class SourceManager {
- constructor() {
- this.config = null;
- this._ensureConfigDir();
- this.hermesApi = new HermesSourceApi();
- }
+  constructor() {
+    this.config = null;
+    this._ensureConfigDir();
+    this.hermesApi = new HermesSourceApi();
+  }
 
-    _ensureConfigDir() {
-        if (!fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true });
-        }
+  _ensureConfigDir() {
+    if (!fs.existsSync(CONFIG_DIR)) {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    }
+  }
+
+  loadConfig() {
+    try {
+      if (fs.existsSync(SOURCE_CONFIG_FILE)) {
+        this.config = JSON.parse(fs.readFileSync(SOURCE_CONFIG_FILE, "utf-8"));
+        return this.config;
+      }
+    } catch (e) {
+      console.error("[SourceManager] Failed to load config:", e.message);
+    }
+    return null;
+  }
+
+  saveConfig(data) {
+    try {
+      fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(data, null, 2));
+      this.config = data;
+      console.log("[SourceManager] Config saved");
+      return true;
+    } catch (e) {
+      console.error("[SourceManager] Failed to save config:", e.message);
+      return false;
+    }
+  }
+
+  /**
+   * 检查是否为首次安装（无音源配置）
+   */
+  isFirstInstall() {
+    if (!this.config) this.loadConfig();
+    return !this.config || 
+      !this.config.candidates || 
+      this.config.candidates.length === 0 ||
+      !this.config.selectedSource;
+  }
+
+  /** 是否已有可用音源 */
+  hasAvailableSource() {
+    if (!this.config) this.loadConfig();
+    return !!this.config?.selectedSource?.searchUrl;
+  }
+
+  /** 获取当前选中的音源 */
+  getCurrentSource() {
+    if (!this.config) this.loadConfig();
+    return this.config?.selectedSource || null;
+  }
+
+  /** 获取已保存的候选列表 */
+  getCandidates() {
+    if (!this.config) this.loadConfig();
+    return this.config?.candidates || [];
+  }
+
+  /** 用户从候选中选择一个源 */
+  selectSource(source) {
+    this.config = this.config || {};
+    this.config.selectedSource = source;
+    this.config.selectedAt = new Date().toISOString();
+    this.saveConfig(this.config);
+    console.log("[SourceManager] User selected:", source.name);
+  }
+
+  /**
+   * 启动音源获取任务（异步）
+   * 前端通过 checkFetchProgress() 轮询进度
+   */
+  async startFetch() {
+    console.log("[SourceManager] 启动音源获取任务...");
+    return await this.hermesApi.startFetch();
+  }
+
+  /**
+   * 检查获取进度
+   */
+  checkFetchProgress() {
+    const progress = this.hermesApi.checkProgress();
+    
+    // 如果成功完成，保存到配置
+    if (progress.status === 'success' && progress.sources?.length > 0) {
+      this._saveSourcesFromProgress(progress);
+    }
+    
+    return progress;
+  }
+
+  /**
+   * 从进度结果保存音源
+   */
+  _saveSourcesFromProgress(progress) {
+    const sources = progress.sources.map((s, i) => ({
+      id: s.id || `source_${String(i + 1).padStart(3, '0')}`,
+      name: s.name,
+      searchUrl: s.url,
+      repo: s.repo,
+      quality: s.quality,
+      stars: s.stars,
+      selected: i < 5 // 默认选中前5个
+    }));
+
+    this.config = this.config || {};
+    this.config.candidates = sources;
+    this.config.lastFetchAt = progress.timestamp;
+    this.config.version = 11;
+    this.saveConfig(this.config);
+
+    if (!this.config.selectedSource && sources.length > 0) {
+      this.selectSource(sources[0]);
     }
 
-    loadConfig() {
-        try {
-            if (fs.existsSync(SOURCE_CONFIG_FILE)) {
-                this.config = JSON.parse(fs.readFileSync(SOURCE_CONFIG_FILE, "utf-8"));
-                return this.config;
-            }
-        } catch (e) {
-            console.error("[SourceManager] Failed to load config:", e.message);
-        }
-        return null;
+    console.log("[SourceManager] 保存了", sources.length, "个音源");
+  }
+
+  /**
+   * 旧版同步获取方法（已弃用，保留兼容）
+   */
+  async fetchSources(testSong = "周杰伦") {
+    console.log("[SourceManager] 使用旧版同步获取方法...");
+    
+    // 启动任务
+    await this.hermesApi.startFetch();
+    
+    // 等待完成（最长30分钟）
+    const maxWait = 1800000;
+    const interval = 5000;
+    let waited = 0;
+    
+    while (waited < maxWait) {
+      const progress = this.hermesApi.checkProgress();
+      if (progress.status === 'success') {
+        return this._saveSourcesFromProgress(progress);
+      }
+      if (progress.status === 'error' || progress.status === 'timeout') {
+        throw new Error(progress.message);
+      }
+      
+      await new Promise(r => setTimeout(r, interval));
+      waited += interval;
     }
-
-    saveConfig(data) {
-        try {
-            fs.writeFileSync(SOURCE_CONFIG_FILE, JSON.stringify(data, null, 2));
-            this.config = data;
-            console.log("[SourceManager] Config saved");
-            return true;
-        } catch (e) {
-            console.error("[SourceManager] Failed to save config:", e.message);
-            return false;
-        }
-    }
-
-    /**
-     * 检查是否为首次安装（无音源配置）
-     */
-    isFirstInstall() {
-        if (!this.config) this.loadConfig();
-        // 首次安装：没有配置文件，或者 candidates 为空，或者 selectedSource 为空
-        return !this.config || 
-               !this.config.candidates || 
-               this.config.candidates.length === 0 ||
-               !this.config.selectedSource;
-    }
-
-    /** 是否已有可用音源 */
-    hasAvailableSource() {
-        if (!this.config) this.loadConfig();
-        return !!this.config?.selectedSource?.searchUrl;
-    }
-
-    /** 获取当前选中的音源 */
-    getCurrentSource() {
-        if (!this.config) this.loadConfig();
-        return this.config?.selectedSource || null;
-    }
-
-    /** 获取已保存的候选列表（最多5个） */
-    getCandidates() {
-        if (!this.config) this.loadConfig();
-        return this.config?.candidates || [];
-    }
-
-    /** 用户从候选中选择一个源 */
-    selectSource(source) {
-        this.config = this.config || {};
-        this.config.selectedSource = source;
-        this.config.selectedAt = new Date().toISOString();
-        this.saveConfig(this.config);
-        console.log("[SourceManager] User selected:", source.name);
-    }
-
- /**
- * 通过 Hermes CLI 实时搜索音源仓库
- * 流程：Hermes 搜索 → 返回仓库 URL → GitHub API 获取文件
- */
- async fetchSources(testSong = "周杰伦") {
- console.log("[SourceManager] === 开始实时获取音源 ===");
-
- const hermesAvailable = await this.hermesApi.checkAvailability();
- if (!hermesAvailable) {
- throw new Error("Hermes CLI 不可用，请确保 Hermes Agent 正在运行");
- }
-
- console.log("[SourceManager] Hermes CLI 可用，开始搜索仓库...");
-
- try {
- const sources = await this.hermesApi.fetchMusicSources();
- if (sources && sources.length > 0) {
- return this._saveSources(sources, "hermes-search");
- }
- throw new Error("Hermes 未返回有效音源");
- } catch (error) {
- console.error("[SourceManager] Hermes 搜索失败:", error.message);
- throw error;
- }
- }
-
- /**
- * 保存音源到配置
- */
-  _saveSources(sources, source) {
-  const validSources = sources.filter(s => {
-    if (!s || !s.searchUrl || !s.searchUrl.startsWith("http")) return false;
-    return true;
-  }).slice(0, 10);
-
- if (validSources.length === 0) {
- throw new Error("没有找到有效的音源");
- }
-
- this.config = this.config || {};
- this.config.candidates = validSources;
- this.config.lastFetchAt = new Date().toISOString();
- this.config.version = 11;
- this.config.source = source;
- this.saveConfig(this.config);
-
- if (!this.config.selectedSource) {
- this.selectSource(validSources[0]);
- }
-
- console.log("[SourceManager] === 成功获取", validSources.length, "个音源:", validSources.map(s => s.name));
- return validSources;
- }
+    
+    throw new Error("获取超时");
+  }
 
     /**
      * 自动获取音源（用于首次安装和搜索失败时）

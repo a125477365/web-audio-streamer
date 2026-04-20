@@ -462,93 +462,82 @@ var fetchMessage = ref('');
           });
  }
 
- // 新版获取音源：任务模式 + 前端轮询
- let currentTaskId = null;
- let pollInterval = null;
- let pollCount = 0;
+// 新版获取音源：启动任务 + 前端轮询进度
+let pollInterval = null;
+let pollCount = 0;
 
- function doFetchSources() {
- fetchingSources.value = true;
- fetchError.value = '';
- showFetchError.value = false;
- fetchProgress.value = 0;
- fetchMessage.value = '创建任务中...';
+function doFetchSources() {
+fetchingSources.value = true;
+fetchError.value = '';
+showFetchError.value = false;
+fetchProgress.value = 0;
+fetchMessage.value = '正在启动...';
 
- // 1. 创建任务
- apiPost('/source/task/create').then(function(res) {
- if (!res.success) throw new Error(res.error || '创建任务失败');
- 
- currentTaskId = res.taskId;
- fetchMessage.value = '任务已创建，正在启动...';
+// 1. 启动任务（新接口）
+apiPost('/source/fetch/start').then(function(res) {
+if (!res.success) throw new Error(res.error || '启动失败');
 
- // 2. 启动任务
- return apiPost('/source/task/' + currentTaskId + '/start');
- }).then(function(res) {
- if (!res.success) throw new Error(res.error || '启动任务失败');
- 
- fetchMessage.value = 'Hermes 正在搜索...';
- pollCount = 0;
+fetchMessage.value = 'Hermes 正在搜索音源仓库...';
+pollCount = 0;
 
- // 3. 开始轮询（每5秒）
- pollInterval = setInterval(pollTaskStatus, 5000);
- // 立即查询一次
- pollTaskStatus();
+// 2. 开始轮询进度（每5秒）
+pollInterval = setInterval(pollProgress, 5000);
+// 立即查询一次
+pollProgress();
 
- }).catch(function(err) {
- fetchingSources.value = false;
- fetchError.value = err.message;
- showFetchError.value = true;
- });
- }
+}).catch(function(err) {
+fetchingSources.value = false;
+fetchError.value = err.message;
+showFetchError.value = true;
+});
+}
 
- function pollTaskStatus() {
- if (!currentTaskId) return;
+function pollProgress() {
+pollCount++;
+// 最多轮询 360 次（30分钟）
+if (pollCount > 360) {
+clearInterval(pollInterval);
+fetchingSources.value = false;
+fetchError.value = '获取超时（30分钟）';
+showFetchError.value = true;
+return;
+}
 
- pollCount++;
- // 最多轮询 60 次（5分钟）
- if (pollCount > 60) {
- clearInterval(pollInterval);
- fetchingSources.value = false;
- fetchError.value = '获取超时（5分钟）';
- showFetchError.value = true;
- return;
- }
+apiGet('/source/fetch/progress').then(function(res) {
+if (!res.success) return;
 
- apiGet('/source/task/' + currentTaskId + '/status').then(function(res) {
- if (!res.success) return;
+const progress = res.progress;
+fetchProgress.value = progress.progress || 0;
+fetchMessage.value = progress.message || '处理中...';
 
- const task = res.task;
- fetchProgress.value = task.progress || 0;
- fetchMessage.value = task.message || '处理中...';
+if (progress.status === 'success') {
+clearInterval(pollInterval);
+fetchingSources.value = false;
 
- if (task.status === 'completed') {
- clearInterval(pollInterval);
- fetchingSources.value = false;
-
- // 处理结果
- const sources = task.result?.sources || [];
- if (sources.length > 0) {
- candidates.value = sources.map(s => ({
- name: s.name,
- searchUrl: s.url,
- quality: s.quality,
- repo: s.repo
- }));
- openSwitchModal();
- } else {
- fetchError.value = '未找到有效音源';
- showFetchError.value = true;
- }
- } else if (task.status === 'failed' || task.status === 'cancelled') {
- clearInterval(pollInterval);
- fetchingSources.value = false;
- fetchError.value = task.error || '任务失败';
- showFetchError.value = true;
- }
- }).catch(function(err) {
- console.error('轮询失败:', err);
- });
- }
+// 处理结果
+const sources = progress.sources || [];
+if (sources.length > 0) {
+candidates.value = sources.map(s => ({
+name: s.name,
+searchUrl: s.url,
+quality: s.quality,
+repo: s.repo
+}));
+openSwitchModal();
+} else {
+fetchError.value = '未找到有效音源';
+showFetchError.value = true;
+}
+} else if (progress.status === 'error' || progress.status === 'timeout') {
+clearInterval(pollInterval);
+fetchingSources.value = false;
+fetchError.value = progress.message || '获取失败';
+showFetchError.value = true;
+}
+}).catch(function(err) {
+console.error('轮询失败:', err);
+});
+}
 
  function openSwitchModal() {
           apiGet('/source/candidates').then(function(res) {
