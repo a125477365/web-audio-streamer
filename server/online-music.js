@@ -66,6 +66,13 @@ export class OnlineMusicApi {
     const base = this._getBaseUrl();
     const style = this._getRequestStyle();
 
+    if (style === 'server-keyword') {
+      if (action === 'search') {
+        return `${base}?server=${this.provider}&type=search&id=0&keyword=${encodeURIComponent(value)}`;
+      }
+      return `${base}?server=${this.provider}&type=${action}&id=${encodeURIComponent(value)}${auth ? `&auth=${auth}` : ''}`;
+    }
+
     if (style === 'media') {
       return `${base}?media=${this.provider}&type=${action}&id=${encodeURIComponent(value)}`;
     }
