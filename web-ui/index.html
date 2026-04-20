@@ -256,7 +256,7 @@
             <div style="background:#1a1a2e;padding:20px;border-radius:12px;border:1px solid #2a2a4a;">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
 <div style="font-weight:600;">🎯 音源设置</div>
-<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中(约2-5分钟)...' : '获取音源' }}</button>
+<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中(每2分钟刷新，最长30分钟)...' : '获取音源' }}</button>
 <button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换</button>
 </div>
 
@@ -394,6 +394,7 @@ var fetchError = ref('');
 var fetchingSources = ref(false);
 var fetchProgress = ref(0);
 var fetchMessage = ref('');
+        var fetchTaskId = ref('');
 			var candidates = ref([]);
 
         // Playlist
@@ -465,8 +466,14 @@ var fetchMessage = ref('');
 // 新版获取音源：启动任务 + 前端轮询进度
 let pollInterval = null;
 let pollCount = 0;
+const FETCH_POLL_INTERVAL = 120000;
+const FETCH_MAX_POLLS = 15;
 
 function doFetchSources() {
+if (pollInterval) {
+clearInterval(pollInterval);
+pollInterval = null;
+}
 fetchingSources.value = true;
 fetchError.value = '';
 showFetchError.value = false;
@@ -477,11 +484,12 @@ fetchMessage.value = '正在启动...';
 apiPost('/source/fetch/start').then(function(res) {
 if (!res.success) throw new Error(res.error || '启动失败');
 
-fetchMessage.value = 'Hermes 正在搜索音源仓库...';
+fetchTaskId.value = res.taskId || '';
+fetchMessage.value = (res.provider || '本地代理') + ' 正在搜索并验证音源，请等待约 2 分钟后查看新进度...';
 pollCount = 0;
 
-// 2. 开始轮询进度（每5秒）
-pollInterval = setInterval(pollProgress, 5000);
+// 2. 开始轮询进度（每2分钟）
+pollInterval = setInterval(pollProgress, FETCH_POLL_INTERVAL);
 // 立即查询一次
 pollProgress();
 
@@ -494,9 +502,10 @@ showFetchError.value = true;
 
 function pollProgress() {
 pollCount++;
-// 最多轮询 360 次（30分钟）
-if (pollCount > 360) {
+// 最多轮询 15 次（30分钟）
+if (pollCount > FETCH_MAX_POLLS) {
 clearInterval(pollInterval);
+pollInterval = null;
 fetchingSources.value = false;
 fetchError.value = '获取超时（30分钟）';
 showFetchError.value = true;
@@ -512,6 +521,7 @@ fetchMessage.value = progress.message || '处理中...';
 
 if (progress.status === 'success') {
 clearInterval(pollInterval);
+pollInterval = null;
 fetchingSources.value = false;
 
 // 处理结果
@@ -519,10 +529,15 @@ const sources = progress.sources || [];
 if (sources.length > 0) {
 candidates.value = sources.map(s => ({
 name: s.name,
-searchUrl: s.url,
+searchUrl: s.searchUrl || s.url,
+requestStyle: s.requestStyle,
+needsAuth: !!s.needsAuth,
 quality: s.quality,
-repo: s.repo
+repo: s.repo,
+aiScore: s.aiScore,
+description: s.description
 }));
+loadCurrentSource();
 openSwitchModal();
 } else {
 fetchError.value = '未找到有效音源';
@@ -530,6 +545,7 @@ showFetchError.value = true;
 }
 } else if (progress.status === 'error' || progress.status === 'timeout') {
 clearInterval(pollInterval);
+pollInterval = null;
 fetchingSources.value = false;
 fetchError.value = progress.message || '获取失败';
 showFetchError.value = true;
@@ -691,6 +707,7 @@ console.error('轮询失败:', err);
           setTimeout(autoFetchIfNeeded, 1000);
         });
         onUnmounted(function() { if (ws) ws.close(); });
+        onUnmounted(function() { if (pollInterval) clearInterval(pollInterval); });
 
         return {
           tab, tabTitle, track, status, volume, esp32, isLive,

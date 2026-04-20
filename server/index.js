@@ -604,7 +604,8 @@ app.post("/api/source/task/:taskId/cancel", (req, res) => {
 app.post("/api/source/fetch/start", async (req, res) => {
 try {
 console.log('[Source] 启动音源获取任务...');
-const result = await sourceManager.startFetch();
+const { testSong = "周杰伦" } = req.body || {};
+const result = await sourceManager.hermesApi.startFetch(testSong);
 res.json({ success: true, ...result });
 } catch (error) {
 res.status(500).json({ success: false, error: error.message });
@@ -624,64 +625,21 @@ res.status(500).json({ success: false, error: error.message });
 // 兼容旧接口：直接获取音源（阻塞式）
 app.post("/api/source/fetch", async (req, res) => {
   try {
-    const { testSong = "周杰伦" } = req.body;
+    const { testSong = "\u5468\u6770\u4f26" } = req.body || {};
     console.log('[Source] Agent fetching sources with "' + testSong + '"...');
-    
-    // 创建并启动任务
-    const taskId = hermesSourceApi.createTask();
-    await hermesSourceApi.startTask(taskId);
-    
-    // 等待完成（最多5分钟）
-    const startTime = Date.now();
-    const timeout = 300000;
-    
-    while (Date.now() - startTime < timeout) {
-      const task = hermesSourceApi.getTaskStatus(taskId);
-      if (task.status === 'completed') {
-        const sources = task.result.sources.map(s => ({
-          name: s.name,
-          searchUrl: s.url,
-          quality: s.quality,
-          repo: s.repo
-        }));
-        
-        // 保存到 SourceManager
-        if (sources.length > 0) {
-          sourceManager.saveConfig({
-            candidates: sources,
-            selectedSource: sources[0],
-            lastFetchAt: new Date().toISOString()
-          });
-        }
-        
-        return res.json({
-          success: true,
-          results: sources,
-          message: '发现 ' + sources.length + ' 个可用音源'
-        });
-      }
-      
-      if (task.status === 'failed' || task.status === 'cancelled') {
-        return res.status(500).json({ 
-          success: false, 
-          error: task.error || '任务失败' 
-        });
-      }
-      
-      await new Promise(r => setTimeout(r, 3000));
-    }
-    
-    res.status(500).json({ success: false, error: "获取超时" });
+
+    const sources = await sourceManager.fetchSources(testSong);
+    return res.json({
+      success: true,
+      results: sources,
+      message: "发现 " + sources.length + " 个可用音源"
+    });
   } catch (error) {
     console.error("[Source] Fetch failed:", error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/**
- * 获取候选音源列表
- * GET /api/source/candidates
- */
 app.get("/api/source/candidates", (req, res) => {
   try {
     const candidates = sourceManager.getCandidates();

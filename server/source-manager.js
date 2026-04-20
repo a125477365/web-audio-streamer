@@ -98,9 +98,9 @@ export class SourceManager {
    * 启动音源获取任务（异步）
    * 前端通过 checkFetchProgress() 轮询进度
    */
-  async startFetch() {
+  async startFetch(testSong = "周杰伦") {
     console.log("[SourceManager] 启动音源获取任务...");
-    return await this.hermesApi.startFetch();
+    return await this.hermesApi.startFetch(testSong);
   }
 
   /**
@@ -124,24 +124,34 @@ export class SourceManager {
     const sources = progress.sources.map((s, i) => ({
       id: s.id || `source_${String(i + 1).padStart(3, '0')}`,
       name: s.name,
-      searchUrl: s.url,
+      searchUrl: s.searchUrl || s.url,
+      requestStyle: s.requestStyle,
+      needsAuth: Boolean(s.needsAuth),
       repo: s.repo,
       quality: s.quality,
       stars: s.stars,
-      selected: i < 5 // 默认选中前5个
+      aiScore: s.aiScore,
+      description: s.description,
+      verifiedAt: s.verifiedAt,
+      selected: false
     }));
 
     this.config = this.config || {};
     this.config.candidates = sources;
     this.config.lastFetchAt = progress.timestamp;
     this.config.version = 11;
+    const previousSelectedUrl = this.config.selectedSource?.searchUrl;
+    const matchedSelection = sources.find((item) => item.searchUrl === previousSelectedUrl);
+    this.config.selectedSource = matchedSelection || sources[0] || null;
     this.saveConfig(this.config);
 
-    if (!this.config.selectedSource && sources.length > 0) {
-      this.selectSource(sources[0]);
+    if (this.config.selectedSource) {
+      this.config.selectedAt = new Date().toISOString();
+      this.saveConfig(this.config);
     }
 
     console.log("[SourceManager] 保存了", sources.length, "个音源");
+    return sources;
   }
 
   /**
@@ -151,11 +161,11 @@ export class SourceManager {
     console.log("[SourceManager] 使用旧版同步获取方法...");
     
     // 启动任务
-    await this.hermesApi.startFetch();
+    await this.hermesApi.startFetch(testSong);
     
-    // 等待完成（最长30分钟）
+    // 等待完成（最长30分钟，每2分钟检查一次）
     const maxWait = 1800000;
-    const interval = 5000;
+    const interval = 120000;
     let waited = 0;
     
     while (waited < maxWait) {

@@ -38,6 +38,7 @@ export class OnlineMusicApi {
 			searchUrl: DEFAULT_API,
 			format: 'json',
 			needsAuth: false,
+      requestStyle: 'server',
 		};
   }
 
@@ -57,6 +58,40 @@ export class OnlineMusicApi {
 		return this.source?.searchUrl || DEFAULT_API;
 	}
 
+  _getRequestStyle() {
+    return this.source?.requestStyle || 'server';
+  }
+
+  _buildApiUrl(action, value, auth) {
+    const base = this._getBaseUrl();
+    const style = this._getRequestStyle();
+
+    if (style === 'media') {
+      return `${base}?media=${this.provider}&type=${action}&id=${encodeURIComponent(value)}`;
+    }
+
+    if (style === 'type-only') {
+      return `${base}?type=${action}&id=${encodeURIComponent(value)}`;
+    }
+
+    if (style === 'q') {
+      if (action !== 'search') {
+        return null;
+      }
+      return `${base}?q=${encodeURIComponent(value)}`;
+    }
+
+    if (style === 'keyword') {
+      if (action !== 'search') {
+        return null;
+      }
+      return `${base}?keyword=${encodeURIComponent(value)}`;
+    }
+
+    const authQuery = auth ? `&auth=${auth}` : '';
+    return `${base}?server=${this.provider}&type=${action}&id=${encodeURIComponent(value)}${authQuery}`;
+  }
+
   /**
    * 生成认证 token (HMAC-SHA1)
    */
@@ -70,17 +105,10 @@ export class OnlineMusicApi {
    */
   async search(query, type = 'song') {
     try {
-      const base = this._getBaseUrl();
-      // 兼容不同落雪/音乐 API 的常见参数形式
-      let url;
-			if (this.source?.name?.toLowerCase() === 'injahow meting') {
-				url = `${base}?type=search&id=${encodeURIComponent(query)}`;
-			} else if (this.source?.name?.toLowerCase() === 'bugpk music') {
-				url = `${base}?media=${this.provider}&type=search&id=${encodeURIComponent(query)}`;
-			} else {
-				// 默认按 nuoxian 风格
-				url = `${base}?server=${this.provider}&type=search&id=${encodeURIComponent(query)}`;
-			}
+      const url = this._buildApiUrl('search', query);
+      if (!url) {
+        throw new Error('当前音源不支持搜索');
+      }
       const data = await this._fetchWithRedirect(url);
 
       if (!Array.isArray(data)) {
@@ -141,8 +169,8 @@ export class OnlineMusicApi {
    */
   async getSongDetail(id) {
     try {
-      const base = this._getBaseUrl();
-      const url = `${base}?server=${this.provider}&type=song&id=${id}`;
+      const url = this._buildApiUrl('song', id);
+      if (!url) return null;
       const data = await this._fetchWithRedirect(url);
 
       if (data && data.title) {
@@ -166,17 +194,11 @@ export class OnlineMusicApi {
    */
   async getSongUrl(id) {
     try {
-      const base = this._getBaseUrl();
-			// 非 nuoxian 类 API 可能不需要 auth
-			let url;
-			if (this.source?.name?.toLowerCase() === 'injahow meting') {
-				url = `${base}?type=url&id=${id}`;
-			} else if (this.source?.name?.toLowerCase() === 'bugpk music') {
-				url = `${base}?media=${this.provider}&type=url&id=${id}`;
-			} else {
-				const auth = this._generateAuth(id, 'url');
-				url = `${base}?server=${this.provider}&type=url&id=${id}&auth=${auth}`;
-			}
+      const auth = this.source?.needsAuth ? this._generateAuth(id, 'url') : null;
+      const url = this._buildApiUrl('url', id, auth);
+      if (!url) {
+        throw new Error('当前音源不支持获取播放链接');
+      }
 
       // 获取重定向后的真实音频链接
       const realUrl = await this._getRedirectUrl(url);
@@ -230,16 +252,9 @@ export class OnlineMusicApi {
    */
   async getLyric(id) {
     try {
-      const base = this._getBaseUrl();
-			let url;
-			if (this.source?.name?.toLowerCase() === 'injahow meting') {
-				url = `${base}?type=lrc&id=${id}`;
-			} else if (this.source?.name?.toLowerCase() === 'bugpk music') {
-				url = `${base}?media=${this.provider}&type=lrc&id=${id}`;
-			} else {
-				const auth = this._generateAuth(id, 'lrc');
-				url = `${base}?server=${this.provider}&type=lrc&id=${id}&auth=${auth}`;
-			}
+      const auth = this.source?.needsAuth ? this._generateAuth(id, 'lrc') : null;
+      const url = this._buildApiUrl('lrc', id, auth);
+      if (!url) return '';
       const data = await this._fetchWithRedirect(url);
       return data;
     } catch (error) {
