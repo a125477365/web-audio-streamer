@@ -156,22 +156,23 @@ export class RecommendationEngine {
    * 调用 AI 模型获取推荐
    */
   async _callAIForRecommendations(artists, options) {
-    const { provider, model, baseUrl } = this.config.ai || {};
-    
-    // 从配置获取 API Key
-    const apiKey = process.env.NVIDIA_API_KEY || this._findApiKey();
-    
-    if (!apiKey) {
-      throw new Error('No API key found');
+    const llmConfig = await this._getLLMConfig();
+
+    if (!llmConfig?.apiKey) {
+      throw new Error('No AI API key found in OpenClaw config or environment');
     }
-    
+
+    const baseUrl = llmConfig.baseUrl || "https://integrate.api.nvidia.com/v1";
+    const apiKey = llmConfig.apiKey;
+    const model = llmConfig.model || 'nvidia/nemotron-3-super-120b-a12b';
+
     const prompt = `你是一个音乐推荐专家。用户本地有以下艺术家的歌曲：${artists.join('、')}。
 
 请推荐10首与这些艺术家风格相似的高质量无损音乐（可以是相同艺术家或其他相似艺术家的歌曲）。
 
 返回格式要求：每行一首，格式为"歌手 - 歌名"，不要其他内容。`;
 
-    const response = await this._callLLM(baseUrl, apiKey, model || 'z-ai/glm5', prompt);
+    const response = await this._callLLM(baseUrl, apiKey, model, prompt);
     
     // 解析推荐列表
     const recommendations = response.split('\n')

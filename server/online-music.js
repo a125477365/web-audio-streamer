@@ -49,37 +49,73 @@ export class OnlineMusicApi {
     const base = this._getBaseUrl();
     const style = this._getRequestStyle();
 
-    if (style === "server-keyword") {
-      if (action === "search") {
-        return `${base}?server=${this.provider}&type=search&id=0&keyword=${encodeURIComponent(value)}`;
+    const keywordParams = ["keywords", "keyword", "msg", "q", "name", "search_query", "wd", "w"];
+    const idParams = ["id", "mid", "songid", "track_id"];
+
+    const applyValue = (urlObj, paramNames, replacementValue) => {
+      for (const p of paramNames) {
+        if (urlObj.searchParams.has(p)) {
+          urlObj.searchParams.set(p, replacementValue);
+          return;
+        }
       }
-      return `${base}?server=${this.provider}&type=${action}&id=${encodeURIComponent(value)}${auth ? `&auth=${auth}` : ""}`;
+      urlObj.searchParams.append(paramNames[0], replacementValue);
+    };
+
+    let urlObj;
+    try {
+      urlObj = new URL(base);
+    } catch {
+      return null;
+    }
+
+    if (style === "server-keyword" || style === "server") {
+      if (action === "search") {
+        applyValue(urlObj, keywordParams, value);
+      } else {
+        applyValue(urlObj, keywordParams, value);
+        applyValue(urlObj, idParams, value);
+      }
+      if (!urlObj.searchParams.has("server")) {
+        urlObj.searchParams.set("server", this.provider);
+      }
+      if (action !== "search" && !urlObj.searchParams.has("type")) {
+        urlObj.searchParams.set("type", action);
+      }
+      if (auth) urlObj.searchParams.set("auth", auth);
+      return urlObj.toString();
     }
 
     if (style === "media") {
-      return `${base}?media=${this.provider}&type=${action}&id=${encodeURIComponent(value)}`;
+      if (action !== "search") {
+        applyValue(urlObj, idParams, value);
+      } else {
+        applyValue(urlObj, keywordParams, value);
+      }
+      if (!urlObj.searchParams.has("media")) urlObj.searchParams.set("media", this.provider);
+      if (!urlObj.searchParams.has("type")) urlObj.searchParams.set("type", action);
+      return urlObj.toString();
     }
 
     if (style === "type-only") {
-      return `${base}?type=${action}&id=${encodeURIComponent(value)}`;
+      if (action !== "search") {
+        applyValue(urlObj, idParams, value);
+      } else {
+        applyValue(urlObj, keywordParams, value);
+      }
+      if (!urlObj.searchParams.has("type")) urlObj.searchParams.set("type", action);
+      return urlObj.toString();
     }
 
-    if (style === "q") {
+    if (style === "q" || style === "keyword") {
       if (action !== "search") {
         return null;
       }
-      return `${base}?q=${encodeURIComponent(value)}`;
+      applyValue(urlObj, keywordParams, value);
+      return urlObj.toString();
     }
 
-    if (style === "keyword") {
-      if (action !== "search") {
-        return null;
-      }
-      return `${base}?keyword=${encodeURIComponent(value)}`;
-    }
-
-    const authQuery = auth ? `&auth=${auth}` : "";
-    return `${base}?server=${this.provider}&type=${action}&id=${encodeURIComponent(value)}${authQuery}`;
+    return null;
   }
 
   _generateAuth(id, type = "url") {
@@ -96,31 +132,49 @@ export class OnlineMusicApi {
       }
 
       const data = await this._fetchWithRedirect(url);
-      if (!Array.isArray(data)) {
+
+      const rawResults = Array.isArray(data)
+        ? data
+        : (data?.result?.songs || data?.result || data?.data || data?.songs || []);
+      if (!Array.isArray(rawResults)) {
         return {
           success: false,
           error: "Search returned an unexpected payload",
         };
       }
 
-      const songs = data.map((item, index) => {
-        const idMatch = item.url?.match(/id=(\d+)/);
-        const id = item.id || (idMatch ? idMatch[1] : `unknown_${index}`);
+      const songs = rawResults.map((item, index) => {
+        const idMatch = item.playUrl?.match(/id=(\d+)/);
+        const songId = item.id || (idMatch ? idMatch[1] : `unknown_${index}`);
+
+        const artistName = Array.isArray(item.artists)
+          ? item.artists.map((a) => a.name || a).join(", ")
+          : (item.artist || item.author || item.singer || "Unknown");
+
+        const albumName = item.album?.name || item.al || item.albumName || "";
+
+        const coverUrl = item.album?.picUrl || item.picUrl || item.pic || item.cover || "";
+
+        const playUrl = item.url || item.playUrl || item.mp3 || item.sourceUrl || "";
+
+        const duration = item.duration || item.time || item.dt || null;
+        const durationSec = duration ? (duration > 10000 ? duration / 1000 : duration) : null;
 
         return {
-          id,
-          title: item.title || item.name || "Unknown",
-          artist: item.author || item.artist || "Unknown",
-          album: item.album || "",
-          cover: item.pic || item.cover || "",
-          playUrl: item.url || item.playUrl || "",
-          duration: item.duration || item.time || null,
+          id: String(songId),
+          title: item.name || item.title || item.songName || "Unknown",
+          artist: artistName,
+          album: albumName,
+          cover: coverUrl,
+          playUrl,
+          duration: durationSec,
+          durationMs: item.duration || null,
           size: item.size || null,
           sizeText: item.sizeText || (item.size ? `${Math.round((item.size / 1024 / 1024) * 10) / 10}MB` : "Unknown"),
           sampleRate: item.sampleRate || null,
           bitsPerSample: item.bitsPerSample || null,
           channels: item.channels || null,
-          bitrate: item.bitrate || "Unknown",
+          bitrate: item.bitrate || item.br || "Unknown",
           qualityScore: item.qualityScore || 50,
         };
       });
@@ -129,8 +183,7 @@ export class OnlineMusicApi {
         if (!song.duration) {
           return true;
         }
-        const seconds = song.duration > 10000 ? song.duration / 1000 : song.duration;
-        return !(seconds > 0 && seconds < 90);
+        return !(song.duration > 0 && song.duration < 90);
       });
     } catch (error) {
       return {
@@ -149,14 +202,15 @@ export class OnlineMusicApi {
       }
 
       const data = await this._fetchWithRedirect(url);
-      if (data && data.title) {
+      const item = data?.data || data?.song || data?.songs?.[0] || data;
+      if (item && (item.title || item.name)) {
         return {
           id,
-          title: data.title,
-          artist: data.author || "Unknown",
-          album: data.album || "",
-          cover: data.pic || "",
-          url: data.url,
+          title: item.name || item.title,
+          artist: Array.isArray(item.artists) ? item.artists.map(a => a.name || a).join(", ") : (item.artist || item.author || "Unknown"),
+          album: item.album?.name || item.al || "",
+          cover: item.album?.picUrl || item.picUrl || item.pic || "",
+          url: item.url || item.playUrl || "",
         };
       }
     } catch {}

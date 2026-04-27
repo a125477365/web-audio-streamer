@@ -59,30 +59,32 @@ const sourceManager = new SourceManager();
 const hermesSourceApi = new HermesSourceApi();
 sourceManager.isFirstInstall = () => false;
 
-// 首次安装自动获取音源
-(async () => {
-    try {
-        // 检查是否为首次安装
-        if (sourceManager.isFirstInstall()) {
-            console.log("[Source] 首次安装，自动通过 Hermes API 获取音源...");
-            const sources = await sourceManager.fetchSources("周杰伦");
-            if (sources && sources.length > 0) {
-                const firstSource = sources[0];
-                onlineApi.setSource(firstSource);
-                console.log("[Source] 首次安装自动选择音源:", firstSource.name);
-            }
-        } else {
-            // 非首次安装，加载已保存的音源
-            const saved = sourceManager.getCurrentSource();
-            if (saved) {
-                onlineApi.setSource(saved);
-                console.log("[Source] Loaded saved source:", saved.name);
-            }
-        }
-    } catch (e) {
-        console.warn("[Source] 自动获取音源失败:", e.message);
-        console.warn("[Source] 请手动点击「智能获取音源」按钮");
+// Auto-detect and configure best available source on startup
+const DETECTION_TIMEOUT = 30000;
+const startupPromise = (async () => {
+  try {
+    const status = sourceManager.getStatus();
+
+    if (status.currentSource) {
+      onlineApi.setSource(status.currentSource);
+      console.log("[Source] Loaded saved source:", status.currentSource.name);
+      return;
     }
+
+    if (status.candidates?.length > 0) {
+      const best = status.candidates.reduce((a, b) =>
+        (a.aiScore || 0) > (b.aiScore || 0) ? a : b
+      );
+      sourceManager.selectSource(best);
+      onlineApi.setSource(best);
+      console.log("[Source] Auto-selected best candidate:", best.name);
+      return;
+    }
+
+    console.log("[Source] No saved source found. Will auto-fetch on first search.");
+  } catch (e) {
+    console.warn("[Source] Startup source detection failed:", e.message);
+  }
 })();
 
 // ==================== 本地音乐 API ====================
@@ -551,6 +553,147 @@ app.get("/api/radio/play", async (req, res) => {
 
 // ==================== 音源管理 ====================
 
+// 检测可用的代理（Hermes/OpenClaw）
+app.get("/api/source/agents", async (req, res) => {
+  try {
+    const { spawn } = await import("child_process");
+    const results = {};
+
+    const checkAgent = (name, cmd) =>
+      new Promise((resolve) => {
+        const child = spawn(process.platform === "win32" ? "where" : "which", [cmd], {
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+        let found = false;
+        child.stdout.on("data", (chunk) => {
+          if (!found && chunk.toString().trim()) found = true;
+        });
+        child.on("close", (code) => resolve({ name, command: cmd, available: found || code === 0 }));
+        child.on("error", () => resolve({ name, command: cmd, available: false }));
+      });
+
+    const [hermes, openclaw] = await Promise.all([
+      checkAgent("Hermes", "hermes"),
+      checkAgent("OpenClaw", "openclaw"),
+    ]);
+
+    res.json({
+      success: true,
+      agents: [hermes, openclaw],
+      primary: hermes.available ? "Hermes" : openclaw.available ? "OpenClaw" : null,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==================== 实时日志 SSE ====================
+
+// 广播日志到所有 WebSocket 客户端
+function broadcastLog(type, data) {
+  const msg = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(msg);
+    }
+  });
+}
+
+// SSE 流式获取音源（实时显示 Agent 交互日志）
+app.get("/api/source/fetch/stream", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const sendLog = (msg, level = "info") => {
+    sendEvent("log", { message: msg, level, time: new Date().toLocaleTimeString() });
+    console.log(`[Fetch-Stream] [${level}] ${msg}`);
+  };
+
+  sendLog("开始检测可用 AI Provider...");
+
+  const providers = sourceManager._getAvailableAIProviders();
+  const hermesAvailable = false;
+  const aiAvailable = providers.length > 0;
+
+  if (providers.length > 0) {
+    const names = providers.map(p => p.name).join(", ");
+    sendLog(`发现 ${providers.length} 个 AI Provider: ${names}`);
+  } else {
+    sendLog("未检测到任何 AI API Key");
+  }
+
+  if (!hermesAvailable && !aiAvailable) {
+    sendLog("无可用 AI Provider，无法获取音源！", "error");
+    sendEvent("done", { success: false, error: "No AI provider available" });
+    res.end();
+    return;
+  }
+
+  sendLog(`将使用 ${hermesAvailable && aiAvailable ? "Hermes + AI 并行" : hermesAvailable ? "Hermes" : "AI"} 获取音源...`);
+
+  const allSources = [];
+
+  if (hermesAvailable) {
+    sendLog("正在调用 Hermes...");
+    try {
+      const hermesResult = await sourceManager._fetchSourcesWithHermesSSE(
+        "周杰伦",
+        (msg, level) => { sendLog(`[Hermes] ${msg}`, level); }
+      );
+      sendLog(`Hermes 返回 ${hermesResult?.length || 0} 个候选音源`);
+      sendEvent("hermesResult", { sources: hermesResult || [] });
+      if (Array.isArray(hermesResult)) allSources.push(...hermesResult);
+    } catch (err) {
+      sendLog(`Hermes 执行失败: ${err.message}`, "error");
+    }
+  }
+
+  if (aiAvailable) {
+    sendLog("正在调用 AI 发现...");
+    try {
+      const openclawResult = await sourceManager._fetchSourcesWithOpenClawSSE(
+        "Jay Chou",
+        (msg, level) => { sendLog(`[AI] ${msg}`, level); }
+      );
+      sendLog(`AI 返回 ${openclawResult?.length || 0} 个候选音源`);
+      sendEvent("openclawResult", { sources: openclawResult || [] });
+      if (Array.isArray(openclawResult)) allSources.push(...openclawResult);
+    } catch (err) {
+      sendLog(`AI 执行失败: ${err.message}`, "error");
+    }
+  }
+
+  // 合并去重并保存
+  if (allSources.length > 0) {
+    allSources.sort((a, b) => (b.aiScore || 0) - (a.aiScore || 0));
+    const seen = new Set();
+    const deduped = allSources.filter((s) => {
+      if (!s.searchUrl || seen.has(s.searchUrl)) return false;
+      seen.add(s.searchUrl);
+      return true;
+    });
+    sourceManager.saveSourcesFromProgress({
+      status: "success",
+      sources: deduped,
+      timestamp: new Date().toISOString(),
+      provider: hermesAvailable && aiAvailable ? "Hermes+AI" : hermesAvailable ? "Hermes" : "AI"
+    });
+    sendLog(`共发现 ${deduped.length} 个有效音源，已保存`);
+    sendEvent("done", { success: true, sourceCount: deduped.length });
+  } else {
+    sendLog("Hermes 和 AI 均未返回有效音源", "error");
+    sendEvent("done", { success: false, error: "No sources returned from any provider" });
+  }
+  res.end();
+});
+
 /**
  * 音源获取 API（新架构：任务模式）
  */
@@ -601,12 +744,27 @@ app.post("/api/source/task/:taskId/cancel", (req, res) => {
   }
 });
 
-// 新版接口：启动获取任务（异步）
+// 新版接口：启动获取任务（异步，支持并行获取）
 app.post("/api/source/fetch/start", async (req, res) => {
 try {
 console.log('[Source] 启动音源获取任务...');
-const { testSong = "周杰伦" } = req.body || {};
-const result = await sourceManager.hermesApi.startFetch(testSong);
+const { testSong = "周杰伦", useParallel = true } = req.body || {};
+
+let result;
+if (useParallel) {
+  try {
+    const sources = await sourceManager.fetchSourcesParallel(testSong);
+      if (sources.length > 0) {
+        const topSources = sources.slice(0, 10).map((s, i) => ({ ...s, id: `source_${String(i+1).padStart(3,"0")}` }));
+        sourceManager.saveSourcesFromProgress({ status: "success", sources: topSources, timestamp: new Date().toISOString(), provider: "Hermes+AI" });
+        return res.json({ success: true, taskId: "parallel", provider: "Hermes+AI", sources: topSources, message: `通过 Hermes + AI 并行获取发现 ${sources.length} 个音源` });
+    }
+  } catch (parallelErr) {
+    console.log('[Source] Parallel fetch failed, falling back to Hermes:', parallelErr.message);
+  }
+}
+
+result = await sourceManager.hermesApi.startFetch(testSong);
 res.json({ success: true, ...result });
 } catch (error) {
 res.status(500).json({ success: false, error: error.message });

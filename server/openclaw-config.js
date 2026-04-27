@@ -4,6 +4,7 @@
  */
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 export class OpenClawConfig {
@@ -26,14 +27,14 @@ export class OpenClawConfig {
    * 加载 OpenClaw 配置文件
    */
   async _loadConfig() {
-    // 支持多种配置路径
     const configPaths = [
       process.env.OPENCLAW_CONFIG,
       process.env.OPENCLAW_HOME ? path.join(process.env.OPENCLAW_HOME, 'config', 'openclaw.json') : null,
-      path.join(process.env.HOME || '/root', '.openclaw', 'config', 'openclaw.json'),
-      '/home/node/.openclaw/config/openclaw.json',
-      '/root/.openclaw/config/openclaw.json',
-      '/etc/openclaw/config/openclaw.json',
+      path.join(os.homedir(), '.openclaw', 'openclaw.json'),
+      path.join(os.homedir(), '.openclaw', 'config', 'openclaw.json'),
+      '/home/node/.openclaw/openclaw.json',
+      '/root/.openclaw/openclaw.json',
+      '/etc/openclaw/openclaw.json',
     ].filter(Boolean);
 
     for (const configPath of configPaths) {
@@ -61,10 +62,11 @@ export class OpenClawConfig {
   async _loadApiKeysEnv() {
     const envPaths = [
       process.env.OPENCLAW_HOME ? path.join(process.env.OPENCLAW_HOME, 'config', 'api-keys.env') : null,
-      path.join(process.env.HOME || '/root', '.openclaw', 'config', 'api-keys.env'),
-      '/home/node/.openclaw/config/api-keys.env',
-      '/root/.openclaw/config/api-keys.env',
-      '/etc/openclaw/config/api-keys.env',
+      path.join(os.homedir(), '.openclaw', 'api-keys.env'),
+      path.join(os.homedir(), '.openclaw', 'config', 'api-keys.env'),
+      '/home/node/.openclaw/api-keys.env',
+      '/root/.openclaw/api-keys.env',
+      '/etc/openclaw/api-keys.env',
     ].filter(Boolean);
 
     for (const envPath of envPaths) {
@@ -96,14 +98,21 @@ export class OpenClawConfig {
    * @returns {Object} { provider, model, baseUrl, apiKey }
    */
   getDefaultModelConfig() {
-    // 1. 从 agents.defaults.model 获取默认模型
-    const defaultModelRef = this.config?.agents?.defaults?.model;
+    // 1. 从 agents.defaults.model.primary 获取默认模型（支持对象或字符串格式）
+    const defaultModelRef = this.config?.agents?.defaults?.model?.primary ||
+                          this.config?.agents?.defaults?.model ||
+                          this.config?.defaultModel;
     if (!defaultModelRef) {
       return null;
     }
 
     // 解析模型引用格式: "provider/model" 或 "provider/owner/model"
-    const parts = defaultModelRef.split('/');
+    const modelStr = typeof defaultModelRef === 'string' ? defaultModelRef : null;
+    if (!modelStr) {
+      return null;
+    }
+
+    const parts = modelStr.split('/');
     if (parts.length < 2) {
       return null;
     }

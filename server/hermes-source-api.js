@@ -350,13 +350,19 @@ export class HermesSourceApi {
   async _detectAvailableAgent() {
     const candidates = [
       { name: "Hermes", executable: "hermes" },
-      { name: "OpenClaw", executable: "openclaw" },
+      { name: "OpenClaw", executable: process.platform === "win32" ? "openclaw.cmd" : "openclaw" },
     ];
 
-    for (const candidate of candidates) {
-      const resolved = await this._resolveExecutable(candidate.executable);
-      if (resolved) {
-        return { ...candidate, ...resolved };
+    const results = await Promise.allSettled(
+      candidates.map(async (c) => {
+        const resolved = await this._resolveExecutable(c.executable);
+        return resolved ? { ...c, ...resolved } : null;
+      })
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value) {
+        return result.value;
       }
     }
 
@@ -377,6 +383,20 @@ export class HermesSourceApi {
     }
 
     const dockerImage = process.env[`${upper}_DOCKER_IMAGE`];
+
+    const [directPath, commonPaths] = await Promise.all([
+      this._which(command),
+      this._findInCommonPaths(command),
+    ]);
+
+    if (directPath) {
+      return this._buildLaunchSpec(directPath);
+    }
+
+    if (commonPaths) {
+      return this._buildLaunchSpec(commonPaths);
+    }
+
     if (dockerImage) {
       const dockerPath = await this._which("docker");
       if (dockerPath) {
@@ -391,18 +411,24 @@ export class HermesSourceApi {
       }
     }
 
-    const directPath = await this._which(command);
-    if (directPath) {
-      return this._buildLaunchSpec(directPath);
-    }
+    return null;
+  }
 
+  async _findInCommonPaths(command) {
     const commonPaths = this._getCommonExecutablePaths(command);
-    for (const candidate of commonPaths) {
-      if (candidate && fs.existsSync(candidate)) {
-        return this._buildLaunchSpec(candidate);
+    const results = await Promise.allSettled(
+      commonPaths.map(async (candidate) => {
+        if (candidate && fs.existsSync(candidate)) {
+          return candidate;
+        }
+        return null;
+      })
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled" && result.value) {
+        return result.value;
       }
     }
-
     return null;
   }
 
@@ -601,6 +627,7 @@ export class HermesSourceApi {
       cwd: process.cwd(),
       env: process.env,
       windowsHide: true,
+      shell: true,
     };
 
     if (agent.launchShellCommand) {
