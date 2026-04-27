@@ -16,14 +16,16 @@ const SOURCE_CONFIG_FILE =
   path.join(os.homedir(), ".openclaw", "web-audio-streamer", "source-config.json");
 
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
-const POLL_INTERVAL_MS = 2 * 60 * 1000;
+const POLL_INTERVAL_MS = 30 * 1000;
+const AGENT_COMMAND_TIMEOUT_MS = 8 * 60 * 1000;
 const VALIDATED_TARGET = 10;
-const DISCOVERY_TARGET = 40;
-const MAX_DISCOVERY_ROUNDS = 2;
+const DISCOVERY_TARGET = 30;
+const MAX_DISCOVERY_ROUNDS = 3;
+const MAX_RETRY_ROUNDS = 2;
 const MIN_FULL_DURATION_SEC = 90;
-const CONFIG_VERSION = 12;
+const CONFIG_VERSION = 13;
 const NXVAV_TOKEN = "nxvav";
-const TEST_QUERIES = ["周杰伦", "林俊杰"];
+const TEST_QUERIES = ["周杰伦", "林俊杰", "Taylor Swift"];
 const REQUEST_STYLES = ["server", "server-keyword", "media", "type-only", "q", "keyword"];
 
 function wait(ms) {
@@ -51,7 +53,6 @@ function normalizeDependencyStatus(items) {
   if (!Array.isArray(items)) {
     return [];
   }
-
   return items
     .map((item) => ({
       name: String(item?.name || item?.dependency || "").trim(),
@@ -69,6 +70,7 @@ export class HermesSourceApi {
     this.configFile = options.configFile || SOURCE_CONFIG_FILE;
     this.tasks = new Map();
     this.currentTaskId = null;
+    this.failedSources = new Set();
     this._loadPersistedProgress();
   }
 
@@ -90,12 +92,14 @@ export class HermesSourceApi {
       result: null,
       cancelled: false,
       attempts: 0,
+      retryCount: 0,
       manualActionRequired: false,
       manualActionMessage: "",
       dependencyStatus: [],
       configVersion: CONFIG_VERSION,
+      agentLogs: [],
+      failedUrls: [],
     };
-
     this.tasks.set(taskId, task);
     return taskId;
   }
@@ -104,14 +108,13 @@ export class HermesSourceApi {
     const agent = await this._detectAvailableAgent();
     const taskId = this.createTask(testSong, agent.name);
     const task = await this.startTask(taskId, agent);
-
     return {
       success: true,
       taskId,
       provider: task.provider,
       pollIntervalMs: this.pollInterval,
       timeoutMs: this.maxTimeout,
-      message: "Source discovery started. Poll every 2 minutes for up to 30 minutes.",
+      message: "Agent 启动音源发现。Agent 将联网搜索最新可用的音乐 API。",
     };
   }
 
@@ -132,7 +135,7 @@ export class HermesSourceApi {
     task.startedAt = new Date().toISOString();
 
     this._updateTask(task, {
-      message: `Detected local ${agent.name}. Starting realtime source discovery.`,
+      message: `检测到本地 ${agent.name}。Agent 将联网搜索最新音乐 API...`,
       progress: 3,
       agentLaunch: {
         name: agent.name,
@@ -142,9 +145,7 @@ export class HermesSourceApi {
     });
 
     this._executeTask(task, agent).catch((error) => {
-      if (task.cancelled) {
-        return;
-      }
+      if (task.cancelled) return;
 
       this._updateTask(task, {
         status: "error",
@@ -160,7 +161,7 @@ export class HermesSourceApi {
 
   getTaskStatus(taskId) {
     const task = this.tasks.get(taskId);
-    return task ? JSON.parse(JSON.stringify(task)) : null;
+    return task ? this._serializeTask(task) : null;
   }
 
   checkProgress() {
@@ -195,9 +196,7 @@ export class HermesSourceApi {
 
   cancelTask(taskId) {
     const task = this.tasks.get(taskId);
-    if (!task) {
-      return null;
-    }
+    if (!task) return null;
 
     task.cancelled = true;
     if (task.child && !task.child.killed) {
@@ -219,10 +218,7 @@ export class HermesSourceApi {
   }
 
   readConfig() {
-    if (!fs.existsSync(this.configFile)) {
-      return null;
-    }
-
+    if (!fs.existsSync(this.configFile)) return null;
     return JSON.parse(fs.readFileSync(this.configFile, "utf-8"));
   }
 
@@ -231,7 +227,6 @@ export class HermesSourceApi {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-
     fs.writeFileSync(this.configFile, JSON.stringify(config, null, 2));
     return config;
   }
@@ -246,24 +241,28 @@ export class HermesSourceApi {
     let latestDependencyStatus = [];
 
     for (let round = 1; round <= MAX_DISCOVERY_ROUNDS; round += 1) {
-      if (task.cancelled) {
-        return;
-      }
+      if (task.cancelled) return;
 
       task.attempts = round;
       this._updateTask(task, {
-        progress: 5 + (round - 1) * 8,
-        message:
-          round === 1
-            ? `Asking ${agent.name} to discover live music sources.`
-            : `Validated sources are still below 10. Asking ${agent.name} for more live sources.`,
+        progress: 5 + Math.floor((round - 1) * 15),
+        message: `Agent 第 ${round} 轮搜索：联网查找最新音乐 API...`,
       });
 
+      const excludedForThisRound = [
+        ...discoveredUrls,
+        ...task.failedUrls,
+        ...this.failedSources,
+      ];
+
       const discovery = await this._discoverSourceCandidates(
+        task,
         agent,
         task.testSong,
-        [...discoveredUrls],
+        excludedForThisRound,
         DISCOVERY_TARGET,
+        round,
+        validatedSources.length,
       );
 
       latestManualActionRequired = latestManualActionRequired || Boolean(discovery.manualActionRequired);
@@ -272,24 +271,26 @@ export class HermesSourceApi {
         ? discovery.dependencyStatus
         : latestDependencyStatus;
 
-      this._updateTask(task, {
-        manualActionRequired: latestManualActionRequired,
-        manualActionMessage: latestManualActionMessage,
-        dependencyStatus: latestDependencyStatus,
-      });
+      if (discovery.agentLogs?.length) {
+        task.agentLogs.push(...discovery.agentLogs);
+        this._updateTask(task, { agentLogs: task.agentLogs });
+      }
 
+      let newCandidates = 0;
       for (const candidate of discovery.candidates) {
-        if (discoveredUrls.has(candidate.searchUrl)) {
-          continue;
+        if (!discoveredUrls.has(candidate.searchUrl)) {
+          discoveredUrls.add(candidate.searchUrl);
+          discoveredCandidates.push(candidate);
+          newCandidates++;
         }
-
-        discoveredUrls.add(candidate.searchUrl);
-        discoveredCandidates.push(candidate);
       }
 
       this._updateTask(task, {
-        progress: 10 + (round - 1) * 8,
-        message: `Discovered ${discoveredCandidates.length} live candidates. Validating search and playback now.`,
+        progress: 10 + Math.floor((round - 1) * 15),
+        message: `Agent 发现 ${newCandidates} 个新候选。正在验证搜索和播放...`,
+        manualActionRequired: latestManualActionRequired,
+        manualActionMessage: latestManualActionMessage,
+        dependencyStatus: latestDependencyStatus,
       });
 
       const ranked = await this._validateAndRankSources(
@@ -309,6 +310,12 @@ export class HermesSourceApi {
       if (validatedSources.length >= VALIDATED_TARGET) {
         break;
       }
+
+      if (round < MAX_DISCOVERY_ROUNDS) {
+        this._updateTask(task, {
+          message: `已验证 ${validatedSources.length}/${VALIDATED_TARGET}，Agent 将继续搜索更多...`,
+        });
+      }
     }
 
     const topSources = validatedSources
@@ -320,19 +327,25 @@ export class HermesSourceApi {
         selected: false,
       }));
 
-    if (topSources.length < VALIDATED_TARGET) {
+    if (topSources.length < VALIDATED_TARGET && topSources.length > 0) {
+      this._updateTask(task, {
+        message: `部分成功：找到 ${topSources.length}/${VALIDATED_TARGET} 个可用音源。`,
+      });
+    }
+
+    if (topSources.length === 0) {
       const manualSuffix = latestManualActionRequired && latestManualActionMessage
-        ? ` Manual action required: ${latestManualActionMessage}`
+        ? ` 需要手动操作: ${latestManualActionMessage}`
         : "";
       throw new Error(
-        `Only validated ${topSources.length} directly usable sources out of the required 10.${manualSuffix}`,
+        `Agent 未能找到任何可用音源。${manualSuffix}`
       );
     }
 
     this._updateTask(task, {
       status: "success",
       progress: 100,
-      message: "Source discovery finished. 10 validated sources are ready for user selection.",
+      message: `Agent 发现 ${topSources.length} 个已验证音源，可供选择。`,
       finishedAt: new Date().toISOString(),
       sources: topSources,
       manualActionRequired: latestManualActionRequired,
@@ -367,7 +380,7 @@ export class HermesSourceApi {
     }
 
     throw new Error(
-      "No local Hermes/OpenClaw runtime detected. Install Hermes or OpenClaw, or set HERMES_COMMAND / OPENCLAW_COMMAND, or configure a Docker image through HERMES_DOCKER_IMAGE / OPENCLAW_DOCKER_IMAGE.",
+      "未检测到 Hermes 或 OpenClaw。请安装 Hermes 或 OpenClaw，或通过 HERMES_COMMAND / OPENCLAW_COMMAND 环境变量指定路径，或配置 HERMES_DOCKER_IMAGE / OPENCLAW_DOCKER_IMAGE Docker 镜像。"
     );
   }
 
@@ -389,13 +402,8 @@ export class HermesSourceApi {
       this._findInCommonPaths(command),
     ]);
 
-    if (directPath) {
-      return this._buildLaunchSpec(directPath);
-    }
-
-    if (commonPaths) {
-      return this._buildLaunchSpec(commonPaths);
-    }
+    if (directPath) return this._buildLaunchSpec(directPath);
+    if (commonPaths) return this._buildLaunchSpec(commonPaths);
 
     if (dockerImage) {
       const dockerPath = await this._which("docker");
@@ -418,16 +426,12 @@ export class HermesSourceApi {
     const commonPaths = this._getCommonExecutablePaths(command);
     const results = await Promise.allSettled(
       commonPaths.map(async (candidate) => {
-        if (candidate && fs.existsSync(candidate)) {
-          return candidate;
-        }
+        if (candidate && fs.existsSync(candidate)) return candidate;
         return null;
       })
     );
     for (const result of results) {
-      if (result.status === "fulfilled" && result.value) {
-        return result.value;
-      }
+      if (result.status === "fulfilled" && result.value) return result.value;
     }
     return null;
   }
@@ -463,30 +467,48 @@ export class HermesSourceApi {
   _buildLaunchSpec(resolvedPath) {
     const lower = resolvedPath.toLowerCase();
 
-    if (process.platform === "win32" && (lower.endsWith(".cmd") || lower.endsWith(".bat"))) {
-      return {
-        resolvedPath,
-        mode: "native",
-        launchCommand: "cmd.exe",
-        launchArgsPrefix: ["/d", "/s", "/c", resolvedPath],
-      };
+    if (process.platform === "win32" && lower.endsWith(".cmd")) {
+      const mjsPath = this._findMjsFromCmdWrapper(resolvedPath);
+      if (mjsPath) {
+        return { resolvedPath: mjsPath, mode: "native", launchCommand: "node", launchArgsPrefix: [mjsPath] };
+      }
     }
 
     if (process.platform === "win32" && lower.endsWith(".ps1")) {
-      return {
-        resolvedPath,
-        mode: "native",
-        launchCommand: "powershell.exe",
-        launchArgsPrefix: ["-ExecutionPolicy", "Bypass", "-File", resolvedPath],
-      };
+      return { resolvedPath, mode: "native", launchCommand: "powershell.exe", launchArgsPrefix: ["-ExecutionPolicy", "Bypass", "-File", resolvedPath] };
     }
 
-    return {
-      resolvedPath,
-      mode: "native",
-      launchCommand: resolvedPath,
-      launchArgsPrefix: [],
-    };
+    if (process.platform === "win32" && lower.endsWith(".mjs")) {
+      return { resolvedPath, mode: "native", launchCommand: "node", launchArgsPrefix: [resolvedPath] };
+    }
+
+    // On Windows, npm shim files have no extension. Detect by checking for sibling .cmd.
+    // Also handle the case where `where` returns the bare shim path (e.g. C:\...\npm\openclaw).
+    if (process.platform === "win32") {
+      const noExt = !lower.includes(".");
+      if (noExt || lower.endsWith(".exe")) {
+        const withoutExt = resolvedPath.replace(/\.exe$/i, "");
+        const cmdSibling = withoutExt + ".cmd";
+        if (fs.existsSync(cmdSibling)) {
+          const mjsPath = this._findMjsFromCmdWrapper(cmdSibling);
+          if (mjsPath) {
+            return { resolvedPath: mjsPath, mode: "npm-shim", launchCommand: "node", launchArgsPrefix: [mjsPath] };
+          }
+        }
+      }
+    }
+
+    return { resolvedPath, mode: "native", launchCommand: resolvedPath, launchArgsPrefix: [] };
+  }
+
+  _findMjsFromCmdWrapper(cmdPath) {
+    try {
+      const dir = path.dirname(cmdPath);
+      const basename = path.basename(cmdPath, path.extname(cmdPath));
+      const mjsCandidate = path.join(dir, "node_modules", basename, `${basename}.mjs`);
+      if (fs.existsSync(mjsCandidate)) return mjsCandidate;
+    } catch {}
+    return null;
   }
 
   async _which(command) {
@@ -504,7 +526,6 @@ export class HermesSourceApi {
           resolve(null);
           return;
         }
-
         const firstLine = output
           .split(/\r?\n/)
           .map((line) => line.trim())
@@ -515,9 +536,9 @@ export class HermesSourceApi {
     });
   }
 
-  async _discoverSourceCandidates(agent, testSong, excludedUrls = [], desiredCount = DISCOVERY_TARGET) {
-    const prompt = this._buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount);
-    const responseText = await this._runAgentCommand(agent, prompt);
+  async _discoverSourceCandidates(task, agent, testSong, excludedUrls = [], desiredCount = DISCOVERY_TARGET, round = 1, currentCount = 0) {
+    const prompt = this._buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount, round, currentCount);
+    const responseText = await this._runAgentCommand(task, agent, prompt);
     const payload = this._extractAgentPayload(responseText);
     const rawCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
 
@@ -530,58 +551,74 @@ export class HermesSourceApi {
       manualActionRequired: Boolean(payload.manualActionRequired),
       manualActionMessage: String(payload.manualActionMessage || "").trim(),
       dependencyStatus: normalizeDependencyStatus(payload.dependencyStatus),
+      agentLogs: payload.agentLogs || [],
     };
   }
 
-  _buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount) {
+  _buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount, round = 1, currentCount = 0) {
     const excludedBlock = excludedUrls.length
-      ? `Do not return these URLs again:\n${excludedUrls.join("\n")}\n`
+      ? `已排除以下不可用 URL（不要返回这些）：\n${excludedUrls.join("\n")}\n`
+      : "";
+
+    const roundContext = round > 1
+      ? `这是第 ${round} 轮搜索。前几轮找到的 ${currentCount} 个音源不够理想，请寻找不同类型的音乐 API。`
       : "";
 
     return [
-      `You are ${agent.name} running on behalf of Web Audio Streamer.`,
-      "Goal: perform realtime discovery of PUBLIC music source APIs that are live now and can directly support both song search and playback URL retrieval.",
-      "Hard requirements:",
-      "1. Do not use any built-in, hardcoded, cached, or previously bundled source list.",
-      "2. Search live network resources now and only return URLs that are publicly reachable right now.",
-      "3. Prefer the newest and highest quality reachable public instances.",
-      "4. Exclude GitHub repo pages, article pages without a real API base URL, dead endpoints, login-only endpoints, LAN-only endpoints, 403/404/5xx endpoints, and sources that only provide previews.",
-      "5. If the environment is missing dependencies, tools, or skills needed to perform the search, first try to install them automatically using the best method for the current environment.",
-      "6. Consider Windows, macOS, Linux, Docker, npm global installs, shell aliases, and custom install paths when deciding how to work.",
-      "7. If automatic installation fails and blocks discovery, set manualActionRequired=true and explain exactly what the user must install manually.",
-      "8. Return JSON only. No markdown. No commentary.",
+      `你是一个专业的音乐 API 发现专家。你的任务是在互联网上搜索最新、可用的免费音乐流媒体 API。`,
       "",
-      "Before returning candidates, verify each candidate as much as possible from your side:",
-      "- it should look like a real API base URL",
-      "- it should support song search for Chinese music",
-      "- it should be intended for direct API calls rather than documentation only",
+      `## 当前任务`,
+      `你是 ${agent.name}，代表 Web Audio Streamer 应用搜索音源。`,
+      `${roundContext}`,
       "",
-      `Use this test keyword while discovering: ${testSong}`,
-      `Target at least ${desiredCount} candidate URLs so the app can validate and keep the best 10.`,
+      `## 核心要求`,
+      `1. **必须联网搜索**：使用 curl、wget、fetch 或任何可用工具访问真实的网络资源。`,
+      `2. **不要硬编码**：绝对不要使用任何内置、缓存或之前发现的列表。必须实时搜索。`,
+      `3. **只返回公开可访问的 URL**：必须是当下公网可达的 API。`,
+      `4. **排除**：GitHub 仓库页、文章页、登录页、LAN 专用、403/404/5xx 响应、仅提供试听的源。`,
+      `5. **支持中文音乐**：搜索结果必须能处理中文歌曲名（如 ${testSong}）。`,
+      `6. **支持搜索 + 播放**：每个候选必须同时支持歌曲搜索和播放链接获取。`,
+      `7. **自动安装依赖**：如果环境缺少工具，先尝试自动安装（pip install、npm install 等）。`,
+      `8. **返回纯 JSON**：不要 markdown 注释，不要解释。`,
+      "",
+      `## 搜索策略建议`,
+      `- 搜索 "free music API 2024 2025"`,
+      `- 搜索 "music streaming API github"`,
+      `- 搜索 "免费音乐API开源"`,
+      `- 检查流行的 Meting.js 部署实例`,
+      `- 检查 npm 上的音乐相关包`,
+      `- 检查 Vercel/Railway/Render 上的免费音乐 API 部署`,
+      "",
+      `## 测试关键词`,
+      `${testSong}`,
+      "",
+      `## 目标数量`,
+      `至少找到 ${desiredCount} 个候选 URL，应用会验证并保留最好的 ${Math.min(10, desiredCount)} 个。`,
+      "",
       excludedBlock.trim(),
       "",
-      "Return exactly one JSON object with this shape:",
-      "{",
-      '  "manualActionRequired": false,',
-      '  "manualActionMessage": "",',
-      '  "dependencyStatus": [',
-      '    { "name": "curl", "status": "ok|installed|missing|failed", "details": "short message" }',
-      "  ],",
-      '  "candidates": [',
-      "    {",
-      '      "name": "Readable source name",',
-      '      "searchUrl": "https://example.com/api",',
-      '      "requestStyle": "server",',
-      '      "needsAuth": false,',
-      '      "reason": "Why this looks live and suitable now",',
-      '      "detectedFrom": "where you found it",',
-      '      "confidence": 0',
-      "    }",
-      "  ]",
-      "}",
-      'Allowed requestStyle values: "server", "server-keyword", "media", "type-only", "q", "keyword".',
-      "Every candidate must already match the config file format fields used by the app: name, searchUrl, requestStyle, needsAuth, reason.",
-      "If you cannot find enough candidates, still return every real live candidate you can confirm.",
+      `## 返回格式（严格 JSON）`,
+      `{`,
+      `  "manualActionRequired": false,`,
+      `  "manualActionMessage": "",`,
+      `  "dependencyStatus": [`,
+      `    { "name": "curl", "status": "ok|installed|missing|failed", "details": "简短说明" }`,
+      `  ],`,
+      `  "agentLogs": ["搜索步骤日志，如：正在搜索 GitHub...", "找到候选: xxx"]`,
+      `  "candidates": [`,
+      `    {`,
+      `      "name": "可读名称",`,
+      `      "searchUrl": "https://api.example.com/search",`,
+      `      "requestStyle": "server",`,
+      `      "needsAuth": false,`,
+      `      "reason": "为什么这个看起来可用",`,
+      `      "detectedFrom": "从哪里发现（如：GitHub搜索、npm包、Vercel部署）"`,
+      `    }`,
+      `  ]`,
+      `}`,
+      "",
+      `requestStyle 可选值: "server", "server-keyword", "media", "type-only", "q", "keyword"`,
+      `如果找不到足够候选，返回你确认的所有真实可用 API。`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -609,59 +646,110 @@ export class HermesSourceApi {
     return REQUEST_STYLES.includes(value) ? value : null;
   }
 
-  async _runAgentCommand(agent, prompt) {
-    const agentArgs = [
-      "agent",
+  async _runAgentCommand(task, agent, prompt) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-agent-"));
+    const promptFile = path.join(tmpDir, "prompt.txt");
+    fs.writeFileSync(promptFile, prompt, "utf8");
+
+    const fullArgs = [
+      "infer", "model", "run",
+      "--prompt", `@${promptFile}`,
       "--json",
-      "--timeout",
-      String(Math.ceil(this.maxTimeout / 1000)),
-      "--to",
-      "+10000000000",
-      "--message",
-      prompt,
+      "--local",
     ];
 
-    let command = agent.launchCommand || agent.executable;
-    let args = [...(agent.launchArgsPrefix || []), ...agentArgs];
-    let options = {
-      cwd: process.cwd(),
-      env: process.env,
-      windowsHide: true,
-      shell: true,
-    };
+    let command, args, options;
 
     if (agent.launchShellCommand) {
       const shellArgs = parseShellWords(agent.launchShellCommand);
       if (!shellArgs.length) {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
         throw new Error(`Invalid ${agent.name} command override`);
       }
-      command = shellArgs.shift();
-      args = [...shellArgs, ...agentArgs];
+      command = shellArgs[0];
+      args = [...shellArgs.slice(1), ...fullArgs];
+      options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: false };
+    } else if (agent.launchCommand === "node") {
+      command = "node";
+      args = [...(agent.launchArgsPrefix || []), ...fullArgs];
+      options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: false };
+    } else {
+      command = agent.launchCommand || agent.executable;
+      args = [...(agent.launchArgsPrefix || []), ...fullArgs];
+      options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
     }
+
+    const fullCmd = `${command} ${args.join(" ")}`;
+    console.log(`[AgentDiscovery] ════════════════════════════════════════════`);
+    console.log(`[AgentDiscovery] >>> Agent 执行命令:`);
+    console.log(`[AgentDiscovery]     ${fullCmd}`);
+    console.log(`[AgentDiscovery] ════════════════════════════════════════════`);
 
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, options);
+      const timeoutMs = Math.min(this.maxTimeout, AGENT_COMMAND_TIMEOUT_MS);
       let stdout = "";
       let stderr = "";
+      let settled = false;
 
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk.toString();
-      });
+      task.child = child;
 
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-      });
+      const cleanup = () => {
+        task.child = null;
+        try { fs.unlinkSync(promptFile); } catch {}
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      };
+
+      const finish = (callback) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        cleanup();
+        callback();
+      };
+
+      const timeoutHandle = setTimeout(() => {
+        if (!child.killed) {
+          child.kill();
+        }
+        finish(() => {
+          reject(new Error(`${agent.name} command timed out after ${Math.round(timeoutMs / 1000)}s`));
+        });
+      }, timeoutMs);
+
+      const clearPendingTimeout = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        cleanup();
+      };
+
+      child.once("close", clearPendingTimeout);
+      child.once("error", clearPendingTimeout);
+
+      child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
       child.on("close", (code) => {
+        try { fs.unlinkSync(promptFile); } catch {}
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
         if (code !== 0 && !stdout) {
           reject(new Error(stderr.trim() || `${agent.name} exited with code ${code}`));
           return;
         }
-
+        console.log(`[AgentDiscovery] <<< Agent 响应 (${stdout.length} chars)`);
         resolve(`${stdout}\n${stderr}`.trim());
       });
 
-      child.on("error", reject);
+      child.on("error", (err) => {
+        try { fs.unlinkSync(promptFile); } catch {}
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+        reject(err);
+      });
     });
   }
 
@@ -672,6 +760,7 @@ export class HermesSourceApi {
         manualActionRequired: false,
         manualActionMessage: "",
         dependencyStatus: [],
+        agentLogs: [],
         candidates: directJson,
       };
     }
@@ -687,6 +776,7 @@ export class HermesSourceApi {
           manualActionRequired: false,
           manualActionMessage: "",
           dependencyStatus: [],
+          agentLogs: [],
           candidates: nestedJson,
         };
       }
@@ -699,7 +789,7 @@ export class HermesSourceApi {
       return directJson;
     }
 
-    throw new Error("Failed to parse JSON returned by local agent.");
+    throw new Error("Agent 返回格式无法解析。");
   }
 
   _extractLastJsonValue(text) {
@@ -734,27 +824,29 @@ export class HermesSourceApi {
     const results = [];
 
     for (let index = 0; index < candidates.length; index += 1) {
-      if (task.cancelled) {
-        return results;
-      }
+      if (task.cancelled) return results;
 
       const candidate = candidates[index];
       if (alreadyValidatedUrls.has(candidate.searchUrl)) {
         continue;
       }
 
-      const progress = 15 + Math.floor(((index + 1) / Math.max(candidates.length, 1)) * 80);
+      const progress = 15 + Math.floor(((index + 1) / Math.max(candidates.length, 1)) * 75);
       this._updateTask(task, {
         progress,
-        message: `Validating source ${index + 1}/${candidates.length}: ${candidate.name}`,
+        message: `验证中 ${index + 1}/${candidates.length}: ${candidate.name}`,
       });
 
       const validated = await this._validateSource(candidate);
       if (validated) {
         results.push(validated);
-        if (existingCount + results.length >= VALIDATED_TARGET) {
-          break;
-        }
+      } else {
+        task.failedUrls.push(candidate.searchUrl);
+        this.failedSources.add(candidate.searchUrl);
+      }
+
+      if (existingCount + results.length >= VALIDATED_TARGET) {
+        break;
       }
     }
 
@@ -766,9 +858,7 @@ export class HermesSourceApi {
 
     for (const requestStyle of styleCandidates) {
       const validation = await this._validateSourceWithStyle(candidate, requestStyle);
-      if (validation) {
-        return validation;
-      }
+      if (validation) return validation;
     }
 
     return null;
@@ -787,14 +877,10 @@ export class HermesSourceApi {
         const payload = await this._fetchJson(searchUrl);
         const songs = this._extractSongs(payload);
         totalLatency += Date.now() - startedAt;
-        if (!songs.length) {
-          continue;
-        }
+        if (!songs.length) continue;
 
         const playableSong = await this._findPlayableSong(candidate.searchUrl, requestStyle, songs);
-        if (!playableSong) {
-          continue;
-        }
+        if (!playableSong) continue;
 
         queryResults.push({ query, songs, playableSong });
         if (!bestPlayable || playableSong.durationSec > bestPlayable.durationSec) {
@@ -805,9 +891,7 @@ export class HermesSourceApi {
       }
     }
 
-    if (!queryResults.length || !bestPlayable) {
-      return null;
-    }
+    if (!queryResults.length || !bestPlayable) return null;
 
     const averageLatency = Math.round(totalLatency / queryResults.length);
     const averageResults = Math.round(
@@ -822,8 +906,8 @@ export class HermesSourceApi {
       searchUrl: candidate.searchUrl,
       requestStyle,
       needsAuth: bestPlayable.needsAuth,
-      repo: "AI realtime discovery",
-      description: candidate.notes || `${requestStyle} source`,
+      repo: candidate.detectedFrom || "Agent 发现",
+      description: candidate.notes || `${requestStyle} 模式`,
       aiScore: this._scoreCandidate({
         averageLatency,
         averageResults,
@@ -846,14 +930,10 @@ export class HermesSourceApi {
 
     for (const song of songCandidates) {
       const playable = await this._resolvePlayableUrl(baseUrl, requestStyle, song);
-      if (!playable) {
-        continue;
-      }
+      if (!playable) continue;
 
       const durationSec = this._extractDurationSec(song) || this._probeDuration(playable.url);
-      if (!durationSec || durationSec < MIN_FULL_DURATION_SEC) {
-        continue;
-      }
+      if (!durationSec || durationSec < MIN_FULL_DURATION_SEC) continue;
 
       return {
         title: song.title || song.name || "Unknown Song",
@@ -870,42 +950,26 @@ export class HermesSourceApi {
   _extractDurationSec(song) {
     const rawDuration = song?.duration ?? song?.time ?? null;
     const numericDuration = toNumber(rawDuration);
-    if (!numericDuration) {
-      return null;
-    }
-
-    if (numericDuration > 10000) {
-      return numericDuration / 1000;
-    }
-
+    if (!numericDuration) return null;
+    if (numericDuration > 10000) return numericDuration / 1000;
     return numericDuration;
   }
 
   _scoreCandidate({ averageLatency, averageResults, averageDuration, queryCount, confidence }) {
     let score = 40;
 
-    if (queryCount >= 2) {
-      score += 15;
-    } else if (queryCount === 1) {
-      score += 5;
-    }
+    if (queryCount >= 2) score += 15;
+    else if (queryCount === 1) score += 5;
 
     score += Math.min(averageResults, 20);
     score += Math.min(15, Math.round((confidence || 0) / 10));
 
-    if (averageLatency < 1500) {
-      score += 15;
-    } else if (averageLatency < 3000) {
-      score += 8;
-    }
+    if (averageLatency < 1500) score += 15;
+    else if (averageLatency < 3000) score += 8;
 
-    if (averageDuration >= 240) {
-      score += 10;
-    } else if (averageDuration >= 180) {
-      score += 6;
-    } else if (averageDuration >= 120) {
-      score += 3;
-    }
+    if (averageDuration >= 240) score += 10;
+    else if (averageDuration >= 180) score += 6;
+    else if (averageDuration >= 120) score += 3;
 
     return Math.max(1, Math.min(100, score));
   }
@@ -931,41 +995,22 @@ export class HermesSourceApi {
   }
 
   _extractSongs(payload) {
-    if (Array.isArray(payload)) {
-      return payload;
-    }
-
-    if (Array.isArray(payload?.data)) {
-      return payload.data;
-    }
-
-    if (Array.isArray(payload?.result)) {
-      return payload.result;
-    }
-
-    if (Array.isArray(payload?.songs)) {
-      return payload.songs;
-    }
-
-    if (Array.isArray(payload?.data?.songs)) {
-      return payload.data.songs;
-    }
-
+    if (Array.isArray(payload)) return payload;
+    if (Array.isArray(payload?.data)) return payload.data;
+    if (Array.isArray(payload?.result)) return payload.result;
+    if (Array.isArray(payload?.songs)) return payload.songs;
+    if (Array.isArray(payload?.data?.songs)) return payload.data.songs;
     return [];
   }
 
   async _resolvePlayableUrl(baseUrl, requestStyle, song) {
     if (song?.url && /^https?:/i.test(song.url)) {
       const directUrl = await this._followRedirect(song.url);
-      if (directUrl) {
-        return { url: directUrl, needsAuth: false };
-      }
+      if (directUrl) return { url: directUrl, needsAuth: false };
     }
 
     const songId = song?.id;
-    if (!songId) {
-      return null;
-    }
+    if (!songId) return null;
 
     const attempts = [];
 
@@ -994,10 +1039,7 @@ export class HermesSourceApi {
       try {
         const playableUrl = await this._followRedirect(attempt.url);
         if (playableUrl) {
-          return {
-            url: playableUrl,
-            needsAuth: attempt.needsAuth,
-          };
+          return { url: playableUrl, needsAuth: attempt.needsAuth };
         }
       } catch {
         continue;
@@ -1026,20 +1068,14 @@ export class HermesSourceApi {
       return this._followRedirect(nextUrl, maxRedirects - 1);
     }
 
-    if (response.statusCode !== 200) {
-      return null;
-    }
+    if (response.statusCode !== 200) return null;
 
     const contentType = String(response.headers["content-type"] || "");
     if (contentType.includes("application/json")) {
       try {
         const payload = JSON.parse(response.body);
-        if (typeof payload === "string" && /^https?:/i.test(payload)) {
-          return payload;
-        }
-        if (payload?.url && /^https?:/i.test(payload.url)) {
-          return payload.url;
-        }
+        if (typeof payload === "string" && /^https?:/i.test(payload)) return payload;
+        if (payload?.url && /^https?:/i.test(payload.url)) return payload.url;
         return null;
       } catch {
         return null;
@@ -1064,8 +1100,7 @@ export class HermesSourceApi {
         {
           headers: {
             Accept: "*/*",
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
           },
           timeout: 15000,
         },
@@ -1108,13 +1143,10 @@ export class HermesSourceApi {
         { timeout: 10000, encoding: "utf-8", shell: true },
       ).trim();
       const value = Number.parseFloat(output);
-      if (Number.isFinite(value) && value > 0) {
-        return value;
-      }
+      if (Number.isFinite(value) && value > 0) return value;
     } catch {
       return null;
     }
-
     return null;
   }
 
@@ -1130,22 +1162,28 @@ export class HermesSourceApi {
 
   _persistProgress(task) {
     try {
-      fs.writeFileSync(this.resultFile, JSON.stringify(task, null, 2));
+      fs.writeFileSync(this.resultFile, JSON.stringify(this._serializeTask(task), null, 2));
     } catch (error) {
       console.error("[HermesSourceApi] Failed to persist progress:", error.message);
     }
   }
 
+  _serializeTask(task) {
+    const { child, ...serializableTask } = task || {};
+    return JSON.parse(JSON.stringify(serializableTask));
+  }
+
   _loadPersistedProgress() {
-    if (!fs.existsSync(this.resultFile)) {
-      return;
-    }
+    if (!fs.existsSync(this.resultFile)) return;
 
     try {
       const task = JSON.parse(fs.readFileSync(this.resultFile, "utf-8"));
       if (task?.id) {
         this.tasks.set(task.id, task);
         this.currentTaskId = task.id;
+        if (task.failedUrls?.length) {
+          task.failedUrls.forEach((url) => this.failedSources.add(url));
+        }
       }
     } catch {
       // ignore invalid result file

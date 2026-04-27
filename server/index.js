@@ -59,9 +59,11 @@ const sourceManager = new SourceManager();
 const hermesSourceApi = new HermesSourceApi();
 sourceManager.isFirstInstall = () => false;
 
-// Auto-detect and configure best available source on startup
+// Startup: auto-detect saved source
 const DETECTION_TIMEOUT = 30000;
 const startupPromise = (async () => {
+  console.log(`[Agent] Source discovery uses local CLI agent (Hermes/OpenClaw) only.`);
+
   try {
     const status = sourceManager.getStatus();
 
@@ -553,34 +555,55 @@ app.get("/api/radio/play", async (req, res) => {
 
 // ==================== 音源管理 ====================
 
-// 检测可用的代理（Hermes/OpenClaw）
+// 检测可用的代理（Hermes/OpenClaw）和 LLM 配置
 app.get("/api/source/agents", async (req, res) => {
   try {
     const { spawn } = await import("child_process");
-    const results = {};
 
     const checkAgent = (name, cmd) =>
       new Promise((resolve) => {
-        const child = spawn(process.platform === "win32" ? "where" : "which", [cmd], {
-          stdio: ["ignore", "pipe", "ignore"],
-        });
+        const child = spawn(
+          process.platform === "win32" ? "where" : "which",
+          [cmd],
+          { stdio: ["ignore", "pipe", "ignore"] }
+        );
         let found = false;
         child.stdout.on("data", (chunk) => {
           if (!found && chunk.toString().trim()) found = true;
         });
-        child.on("close", (code) => resolve({ name, command: cmd, available: found || code === 0 }));
-        child.on("error", () => resolve({ name, command: cmd, available: false }));
+        child.on("close", (code) =>
+          resolve({
+            name,
+            command: cmd,
+            available: found || code === 0,
+            note: "CLI agent command may not support 'agent' subcommand",
+          })
+        );
+        child.on("error", () =>
+          resolve({ name, command: cmd, available: false, note: "Not found in PATH" })
+        );
       });
 
     const [hermes, openclaw] = await Promise.all([
       checkAgent("Hermes", "hermes"),
-      checkAgent("OpenClaw", "openclaw"),
+      checkAgent("OpenClaw", process.platform === "win32" ? "openclaw.cmd" : "openclaw"),
     ]);
+
+    const primary = hermes.available
+      ? "Hermes"
+      : openclaw.available
+      ? "OpenClaw"
+      : null;
 
     res.json({
       success: true,
       agents: [hermes, openclaw],
-      primary: hermes.available ? "Hermes" : openclaw.available ? "OpenClaw" : null,
+      primary,
+      recommendation: hermes.available
+        ? "Hermes CLI 可用"
+        : openclaw.available
+        ? "OpenClaw CLI 可用"
+        : "未检测到 Hermes 或 OpenClaw CLI Agent。请安装并确保已加入 PATH。",
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -606,92 +629,153 @@ app.get("/api/source/fetch/stream", async (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
+  let clientClosed = false;
+  let lastMessage = "";
+  let lastAgentLogCount = 0;
+
+  req.on("close", () => {
+    clientClosed = true;
+  });
 
   const sendEvent = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (clientClosed) {
+      return;
+    }
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch (e) {
+      clientClosed = true;
+    }
   };
 
   const sendLog = (msg, level = "info") => {
-    sendEvent("log", { message: msg, level, time: new Date().toLocaleTimeString() });
     console.log(`[Fetch-Stream] [${level}] ${msg}`);
+    sendEvent("log", { message: msg, level, time: new Date().toLocaleTimeString() });
   };
 
-  sendLog("开始检测可用 AI Provider...");
+  // Patch console.log to capture LLM direct internal logs and flow them into SSE
+  const _origLog = console.log;
+  const _origWarn = console.warn;
+  const _origError = console.error;
+  console.log = (...args) => {
+    _origLog.apply(console, args);
+    const msg = args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+    if (msg.includes("[LLMDirect]")) {
+      const level = msg.includes("✗") ? "warn" : msg.includes("✓") ? "success" : "info";
+      sendEvent("log", { message: msg, level, time: new Date().toLocaleTimeString() });
+    }
+  };
+  console.warn = (...args) => {
+    _origWarn.apply(console, args);
+    const msg = args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+    sendEvent("log", { message: msg, level: "warn", time: new Date().toLocaleTimeString() });
+  };
+  console.error = (...args) => {
+    _origError.apply(console, args);
+    const msg = args.map((a) => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+    sendEvent("log", { message: msg, level: "error", time: new Date().toLocaleTimeString() });
+  };
+  const restoreConsole = () => {
+    console.log = _origLog;
+    console.warn = _origWarn;
+    console.error = _origError;
+  };
 
-  const providers = sourceManager._getAvailableAIProviders();
-  const hermesAvailable = false;
-  const aiAvailable = providers.length > 0;
+  sendLog("开始音源发现...");
 
-  if (providers.length > 0) {
-    const names = providers.map(p => p.name).join(", ");
-    sendLog(`发现 ${providers.length} 个 AI Provider: ${names}`);
-  } else {
-    sendLog("未检测到任何 AI API Key");
+  try {
+    // Only use CLI agent (Hermes or OpenClaw). No direct LLM API calls.
+    sendLog("开始通过 CLI Agent 发现音源...");
+
+    let result, taskId, provider;
+    try {
+      result = await sourceManager.startFetch("Jay Chou");
+      taskId = result.taskId;
+      provider = result.provider || "CLI Agent";
+      sendLog(`Agent 任务已创建: ${taskId} (via ${provider})`);
+    } catch (agentError) {
+      sendLog(`Agent 不可用: ${agentError.message}`, "error");
+      sendEvent("done", { success: false, error: agentError.message });
+      restoreConsole();
+      try { res.end(); } catch (e) {}
+      return;
+    }
+
+    const maxWait = 30 * 60 * 1000;
+    const interval = 5000;
+    let waited = 0;
+    let lastProgress = 0;
+
+    while (waited < maxWait && !clientClosed) {
+      await new Promise((r) => setTimeout(r, interval));
+      waited += interval;
+
+      const task = sourceManager.hermesApi.getTaskStatus(taskId);
+      if (!task) continue;
+
+      if (task.progress > lastProgress) {
+        sendLog(`进度: ${task.progress}%`);
+        sendEvent("progress", { progress: task.progress });
+        lastProgress = task.progress;
+      }
+
+      if (task.message && task.message !== lastMessage) {
+        sendLog(task.message);
+        sendEvent("message", { message: task.message });
+        lastMessage = task.message;
+      }
+
+      if (task.agentLogs?.length > lastAgentLogCount) {
+        for (const log of task.agentLogs.slice(lastAgentLogCount)) {
+          sendLog(`[Agent] ${log}`);
+        }
+        lastAgentLogCount = task.agentLogs.length;
+      }
+
+      if (task.status === "success") {
+        const topSources = (task.sources || []).slice(0, 10);
+        sourceManager.saveSourcesFromProgress(task);
+        sendLog(`成功！Agent 发现 ${topSources.length} 个已验证音源`);
+        sendEvent("done", {
+          success: true,
+          sourceCount: topSources.length,
+          sources: topSources,
+          provider: task.provider
+        });
+        restoreConsole();
+        try { res.end(); } catch (e) {}
+        return;
+      }
+
+      if (task.status === "error" || task.status === "cancelled") {
+        sendLog(
+          `Agent 任务${task.status === "cancelled" ? "已取消" : "失败"}: ${task.message}`,
+          "error"
+        );
+        sendEvent("done", { success: false, error: task.message });
+        restoreConsole();
+        try { res.end(); } catch (e) {}
+        return;
+      }
+    }
+
+    sendLog("Agent 任务超时（30分钟）", "error");
+    if (clientClosed) {
+      restoreConsole();
+      return;
+    }
+    sendEvent("done", { success: false, error: "Timeout" });
+  } catch (err) {
+    sendLog(`启动失败: ${err.message}`, "error");
+    sendEvent("done", { success: false, error: err.message });
   }
 
-  if (!hermesAvailable && !aiAvailable) {
-    sendLog("无可用 AI Provider，无法获取音源！", "error");
-    sendEvent("done", { success: false, error: "No AI provider available" });
+  restoreConsole();
+  try {
     res.end();
-    return;
+  } catch (e) {
+    // Already ended
   }
-
-  sendLog(`将使用 ${hermesAvailable && aiAvailable ? "Hermes + AI 并行" : hermesAvailable ? "Hermes" : "AI"} 获取音源...`);
-
-  const allSources = [];
-
-  if (hermesAvailable) {
-    sendLog("正在调用 Hermes...");
-    try {
-      const hermesResult = await sourceManager._fetchSourcesWithHermesSSE(
-        "周杰伦",
-        (msg, level) => { sendLog(`[Hermes] ${msg}`, level); }
-      );
-      sendLog(`Hermes 返回 ${hermesResult?.length || 0} 个候选音源`);
-      sendEvent("hermesResult", { sources: hermesResult || [] });
-      if (Array.isArray(hermesResult)) allSources.push(...hermesResult);
-    } catch (err) {
-      sendLog(`Hermes 执行失败: ${err.message}`, "error");
-    }
-  }
-
-  if (aiAvailable) {
-    sendLog("正在调用 AI 发现...");
-    try {
-      const openclawResult = await sourceManager._fetchSourcesWithOpenClawSSE(
-        "Jay Chou",
-        (msg, level) => { sendLog(`[AI] ${msg}`, level); }
-      );
-      sendLog(`AI 返回 ${openclawResult?.length || 0} 个候选音源`);
-      sendEvent("openclawResult", { sources: openclawResult || [] });
-      if (Array.isArray(openclawResult)) allSources.push(...openclawResult);
-    } catch (err) {
-      sendLog(`AI 执行失败: ${err.message}`, "error");
-    }
-  }
-
-  // 合并去重并保存
-  if (allSources.length > 0) {
-    allSources.sort((a, b) => (b.aiScore || 0) - (a.aiScore || 0));
-    const seen = new Set();
-    const deduped = allSources.filter((s) => {
-      if (!s.searchUrl || seen.has(s.searchUrl)) return false;
-      seen.add(s.searchUrl);
-      return true;
-    });
-    sourceManager.saveSourcesFromProgress({
-      status: "success",
-      sources: deduped,
-      timestamp: new Date().toISOString(),
-      provider: hermesAvailable && aiAvailable ? "Hermes+AI" : hermesAvailable ? "Hermes" : "AI"
-    });
-    sendLog(`共发现 ${deduped.length} 个有效音源，已保存`);
-    sendEvent("done", { success: true, sourceCount: deduped.length });
-  } else {
-    sendLog("Hermes 和 AI 均未返回有效音源", "error");
-    sendEvent("done", { success: false, error: "No sources returned from any provider" });
-  }
-  res.end();
 });
 
 /**
@@ -744,29 +828,38 @@ app.post("/api/source/task/:taskId/cancel", (req, res) => {
   }
 });
 
-// 新版接口：启动获取任务（异步，支持并行获取）
+// 新版接口：启动获取任务（优先 LLM Direct，回退 Hermes/OpenClaw CLI Agent）
 app.post("/api/source/fetch/start", async (req, res) => {
 try {
 console.log('[Source] 启动音源获取任务...');
-const { testSong = "周杰伦", useParallel = true } = req.body || {};
+const { testSong = "周杰伦" } = req.body || {};
 
-let result;
-if (useParallel) {
-  try {
-    const sources = await sourceManager.fetchSourcesParallel(testSong);
-      if (sources.length > 0) {
-        const topSources = sources.slice(0, 10).map((s, i) => ({ ...s, id: `source_${String(i+1).padStart(3,"0")}` }));
-        sourceManager.saveSourcesFromProgress({ status: "success", sources: topSources, timestamp: new Date().toISOString(), provider: "Hermes+AI" });
-        return res.json({ success: true, taskId: "parallel", provider: "Hermes+AI", sources: topSources, message: `通过 Hermes + AI 并行获取发现 ${sources.length} 个音源` });
-    }
-  } catch (parallelErr) {
-    console.log('[Source] Parallel fetch failed, falling back to Hermes:', parallelErr.message);
+const result = await sourceManager.startFetch(testSong);
+
+// Handle LLM Direct result (synchronous, sources already validated)
+if (result.sources && Array.isArray(result.sources)) {
+  const sources = result.sources;
+  console.log(`[Source] LLM Direct 发现 ${sources.length} 个音源`);
+
+  if (sources.length > 0) {
+    onlineApi.setSource(sources[0]);
+    console.log("[Source] 自动选择最佳音源:", sources[0].name);
   }
+
+  return res.json({
+    success: true,
+    provider: result.provider || "LLM Direct",
+    sourceCount: sources.length,
+    sources: sources,
+    message: result.message || `发现 ${sources.length} 个已验证音源`,
+    isDirect: true,
+  });
 }
 
-result = await sourceManager.hermesApi.startFetch(testSong);
+// Handle Hermes-style async result
 res.json({ success: true, ...result });
 } catch (error) {
+console.error('[Source] 获取失败:', error.message);
 res.status(500).json({ success: false, error: error.message });
 }
 });
@@ -1149,8 +1242,25 @@ process.on("SIGINT", () => {
 process.on("uncaughtException", (err) => {
   console.error("[Server] Uncaught Exception:", err.message);
   console.error(err.stack);
+  // Don't exit - log and continue for better resilience
+  // process.exit(1);
 });
 
+// Only catch unhandled rejections that are actual errors, not benign ones
+let unhandledRejectionCount = 0;
+const MAX_UNHANDLED_REJECTIONS = 10;
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("[Server] Unhandled Rejection:", reason);
+  unhandledRejectionCount++;
+
+  // Log details for debugging
+  const reasonStr = reason instanceof Error
+    ? `${reason.message}\n${reason.stack}`
+    : String(reason);
+  console.error(`[Server] Unhandled Rejection #${unhandledRejectionCount}:`, reasonStr);
+
+  // Only exit if we hit too many unhandled rejections (suggests a systemic issue)
+  if (unhandledRejectionCount > MAX_UNHANDLED_REJECTIONS) {
+    console.error("[Server] Too many unhandled rejections, exiting...");
+    process.exit(1);
+  }
 });
