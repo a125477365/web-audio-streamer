@@ -669,18 +669,89 @@ export class HermesSourceApi {
     return REQUEST_STYLES.includes(value) ? value : null;
   }
 
-  async _runAgentCommand(task, agent, prompt) {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-agent-"));
-    const promptFile = path.join(tmpDir, "prompt.txt");
-    fs.writeFileSync(promptFile, prompt, "utf8");
+ async _runAgentCommand(task, agent, prompt) {
+ // Priority 1: Hermes API Server (most reliable, handles tool calls properly)
+ const apiResult = await this._runViaApiServer(task, agent, prompt);
+ if (apiResult !== null) return apiResult;
+
+ // Priority 2: CLI fallback (for OpenClaw or when API server unavailable)
+ return this._runViaCli(task, agent, prompt);
+ }
+
+ async _runViaApiServer(task, agent, prompt) {
+ const apiBaseUrl = process.env.HERMES_API_URL || "http://localhost:8642";
+ const apiKey = process.env.HERMES_API_KEY || "hermes-open-webui-2024";
+ const url = new URL("/v1/chat/completions", apiBaseUrl);
+
+ console.log(`[AgentDiscovery] >>> 尝试 Hermes API Server: ${url.href}`);
+
+ return new Promise((resolve) => {
+ const timeoutMs = Math.min(this.maxTimeout, AGENT_COMMAND_TIMEOUT_MS);
+ const body = JSON.stringify({
+ model: "hermes-agent",
+ messages: [{ role: "user", content: prompt }],
+ max_tokens: 16384,
+ stream: false,
+ });
+
+ const httpModule = url.protocol === "https:" ? https : http;
+ const reqOpts = {
+ hostname: url.hostname,
+ port: url.port,
+ path: url.pathname,
+ method: "POST",
+ headers: {
+ "Content-Type": "application/json",
+ "Authorization": `Bearer ${apiKey}`,
+ "Content-Length": Buffer.byteLength(body),
+ },
+ timeout: timeoutMs,
+ };
+
+ const req = httpModule.request(reqOpts, (res) => {
+ let data = "";
+ res.on("data", (chunk) => { data += chunk.toString(); });
+ res.on("end", () => {
+ if (res.statusCode === 200) {
+ try {
+ const json = JSON.parse(data);
+ const content = json.choices?.[0]?.message?.content || "";
+ console.log(`[AgentDiscovery] <<< API 响应 (${content.length} chars)`);
+ resolve(content);
+ return;
+ } catch (_) {}
+ }
+ // API failed, fall through to CLI
+ console.log(`[AgentDiscovery] API 返回 ${res.statusCode}, 降级到 CLI 模式`);
+ resolve(null);
+ });
+ });
+
+ req.on("error", (err) => {
+ console.log(`[AgentDiscovery] API 连接失败: ${err.message}, 降级到 CLI 模式`);
+ resolve(null);
+ });
+
+ req.on("timeout", () => {
+ req.destroy();
+ console.log(`[AgentDiscovery] API 超时 (${Math.round(timeoutMs/1000)}s), 降级到 CLI 模式`);
+ resolve(null);
+ });
+
+ req.write(body);
+ req.end();
+ });
+ }
+
+ async _runViaCli(task, agent, prompt) {
+ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-agent-"));
+ const promptFile = path.join(tmpDir, "prompt.txt");
+ fs.writeFileSync(promptFile, prompt, "utf8");
 
  // Hermes CLI: hermes chat -q "$(cat promptFile)" --quiet --source tool
  // OpenClaw CLI: openclaw infer model run --prompt @file --json --local
  const isOpenClaw = agent.executable === "openclaw" || (agent.name && agent.name.toLowerCase().includes("openclaw"));
-
- // For Hermes: we need shell to expand $(cat file) for the -q argument
- // since hermes chat doesn't support @file syntax
- const hermesShellArg = `"$(cat '${promptFile.replace(/'/g, "'\\''")}')"`; // shell-safe: single-quote the path
+ const hermesShellArg = `"$(cat '${promptFile.replace(/'/g, "'\\''")}')"` ;
 
  let command, args, options;
 
