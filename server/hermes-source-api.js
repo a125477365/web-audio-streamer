@@ -679,8 +679,45 @@ export class HermesSourceApi {
  }
 
  async _runViaApiServer(task, agent, prompt) {
- const apiBaseUrl = process.env.HERMES_API_URL || "http://localhost:8642";
- const apiKey = process.env.HERMES_API_KEY || "hermes-open-webui-2024";
+ // Auto-detect API config: env vars > Hermes .env > defaults
+ let apiBaseUrl = process.env.HERMES_API_URL || "";
+ let apiKey = process.env.HERMES_API_KEY || "";
+ let apiPort = "";
+ let apiEnabled = false;
+
+ // Try reading from Hermes .env file
+ const hermesEnvPaths = [
+ "/opt/data/.env", // Docker container
+ path.join(os.homedir(), ".hermes", ".env"), // Linux/Mac user install
+ path.join(os.homedir(), ".config", "hermes", ".env"), // XDG
+ ];
+ for (const envPath of hermesEnvPaths) {
+ try {
+ const envContent = fs.readFileSync(envPath, "utf8");
+ if (!apiEnabled) {
+ const enabledMatch = envContent.match(/^API_SERVER_ENABLED=(.+)$/m);
+ if (enabledMatch && enabledMatch[1].trim().toLowerCase() === "true") apiEnabled = true;
+ }
+ if (!apiPort) {
+ const portMatch = envContent.match(/^API_SERVER_PORT=(\d+)/m);
+ if (portMatch) apiPort = portMatch[1].trim();
+ }
+ if (!apiKey) {
+ const keyMatch = envContent.match(/^API_SERVER_KEY=(.+)$/m);
+ if (keyMatch && keyMatch[1].trim()) {
+ apiKey = keyMatch[1].trim().replace(/^["']|["']$/g, "");
+ console.log(`[AgentDiscovery] 从 ${envPath} 读取 API key`);
+ }
+ }
+ if (apiKey && apiPort) break; // found all we need
+ } catch (_) { /* file not found, skip */ }
+ }
+
+ // Build base URL
+ if (!apiBaseUrl) {
+ const port = apiPort || "8642";
+ apiBaseUrl = `http://localhost:${port}`;
+ }
  const url = new URL("/v1/chat/completions", apiBaseUrl);
 
  console.log(`[AgentDiscovery] >>> 尝试 Hermes API Server: ${url.href}`);
