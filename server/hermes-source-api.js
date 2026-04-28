@@ -454,14 +454,37 @@ export class HermesSourceApi {
       ];
     }
 
-    return [
-      `/usr/local/bin/${command}`,
-      `/usr/bin/${command}`,
-      `/opt/homebrew/bin/${command}`,
-      `/snap/bin/${command}`,
-      path.join(home, ".local", "bin", command),
-      path.join(home, "bin", command),
-    ];
+ const paths = [
+ `/usr/local/bin/${command}`,
+ `/usr/bin/${command}`,
+ `/opt/homebrew/bin/${command}`,     // macOS Homebrew
+ `/snap/bin/${command}`,              // Linux Snap
+ path.join(home, ".local", "bin", command),
+ path.join(home, "bin", command),
+ ];
+
+ // Auto-detect: search installed paths via `which`/`where`
+ try {
+ const whichCmd = process.platform === "win32" ? "where" : "which";
+ const result = require("child_process").execSync(`${whichCmd} ${command} 2>/dev/null`, { encoding: "utf8", timeout: 3000 }).trim();
+ if (result) {
+ for (const line of result.split(/\r?\n/)) {
+ const p = line.trim();
+ if (p && !paths.includes(p)) paths.unshift(p); // prefer detected path
+ }
+ }
+ } catch (_) { /* not found via which/where, that's fine */ }
+
+ // Fallback: common install locations not in PATH
+ const fallbacks = [
+ `/opt/hermes/.venv/bin/${command}`,   // Docker hermes container
+ `/opt/hermes/${command}`,             // Docker alt
+ path.join(home, ".hermes", ".venv", "bin", command),  // User install
+ path.join(home, ".local", "share", "hermes", ".venv", "bin", command), // XDG
+ ];
+ for (const f of fallbacks) { if (!paths.includes(f)) paths.push(f); }
+
+ return paths;
   }
 
   _buildLaunchSpec(resolvedPath) {

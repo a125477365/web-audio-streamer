@@ -140,19 +140,63 @@ EOF
     fi
 }
 
-# 检查 Hermes CLI 可用性
+# 检查 Hermes CLI 可用性（跨平台自动发现）
 check_hermes() {
-    HERMES_PYTHON="${HERMES_VENV_PYTHON:-/opt/hermes/.venv/bin/python3}"
-    HERMES_CLI="${HERMES_CLI_PATH:-/opt/hermes/cli.py}"
-    
-    if [ -x "$HERMES_PYTHON" ] && [ -f "$HERMES_CLI" ]; then
-        echo -e "${GREEN}[√] Hermes CLI 可用${NC}"
-        echo "  Python: $HERMES_PYTHON"
-        echo "  CLI: $HERMES_CLI"
-    else
-        echo -e "${YELLOW}[!] Hermes CLI 不可用（音源自动获取需要 Hermes）${NC}"
-        echo -e "${YELLOW}    如需自动获取音源，请确保 Hermes Agent 正在运行${NC}"
-    fi
+ # 如果用户已通过环境变量指定，优先使用
+ if [ -n "$HERMES_COMMAND" ] && [ -x "$HERMES_COMMAND" ]; then
+ echo -e "${GREEN}[√] Hermes CLI 可用（环境变量指定）${NC}"
+ echo " 路径: $HERMES_COMMAND"
+ export HERMES_COMMAND
+ return 0
+ fi
+
+ # 自动发现：which/where 查找
+ local hermes_path=""
+ if command -v which &> /dev/null; then
+ hermes_path=$(which hermes 2>/dev/null || true)
+ elif command -v where &> /dev/null; then
+ hermes_path=$(where hermes 2>/dev/null | head -1 || true)
+ fi
+
+ if [ -n "$hermes_path" ] && [ -x "$hermes_path" ]; then
+ echo -e "${GREEN}[√] Hermes CLI 可用（PATH 发现）${NC}"
+ echo " 路径: $hermes_path"
+ export HERMES_COMMAND="$hermes_path"
+ return 0
+ fi
+
+ # Fallback: 跨平台常见安装路径
+ local home="$HOME"
+ local candidates=(
+ # Docker 容器
+ "/opt/hermes/.venv/bin/hermes"
+ "/opt/hermes/hermes"
+ # Linux 用户安装
+ "${home}/.local/bin/hermes"
+ "${home}/.hermes/.venv/bin/hermes"
+ "${home}/.local/share/hermes/.venv/bin/hermes"
+ # macOS
+ "/opt/homebrew/bin/hermes"
+ "/usr/local/bin/hermes"
+ # Snap
+ "/snap/bin/hermes"
+ # Windows (MSYS/Git Bash)
+ "${LOCALAPPDATA:-$home/AppData/Local}/Programs/hermes/hermes.exe"
+ "${APPDATA:-$home/AppData/Roaming}/npm/hermes.cmd"
+ )
+
+ for candidate in "${candidates[@]}"; do
+ if [ -x "$candidate" ]; then
+ echo -e "${GREEN}[√] Hermes CLI 可用（自动发现）${NC}"
+ echo " 路径: $candidate"
+ export HERMES_COMMAND="$candidate"
+ return 0
+ fi
+ done
+
+ echo -e "${YELLOW}[!] Hermes CLI 不可用（音源自动获取需要 Hermes）${NC}"
+ echo -e "${YELLOW} 如需自动获取音源，请设置 HERMES_COMMAND 环境变量${NC}"
+ echo -e "${YELLOW} 或确保 hermes 在 PATH 中${NC}"
 }
 
 # 创建音乐目录
@@ -183,8 +227,15 @@ main() {
     echo -e "${GREEN}=========================================${NC}"
     echo ""
     
-    # 启动服务
-    exec npm run dev
+ # 确保 HERMES_COMMAND 传递给 Node 子进程
+ if [ -z "$HERMES_COMMAND" ]; then
+ echo -e "${YELLOW}[i] HERMES_COMMAND 未设置，音源发现可能受限${NC}"
+ else
+ echo -e "${BLUE}[i] HERMES_COMMAND=$HERMES_COMMAND${NC}"
+ fi
+
+ # 启动服务
+ exec npm run dev
 }
 
 # 帮助信息
