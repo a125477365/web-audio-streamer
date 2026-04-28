@@ -17,7 +17,7 @@ const SOURCE_CONFIG_FILE =
 
 const MAX_TIMEOUT_MS = 30 * 60 * 1000;
 const POLL_INTERVAL_MS = 30 * 1000;
-const AGENT_COMMAND_TIMEOUT_MS = 8 * 60 * 1000;
+const AGENT_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
 const VALIDATED_TARGET = 10;
 const DISCOVERY_TARGET = 30;
 const MAX_DISCOVERY_ROUNDS = 3;
@@ -674,33 +674,47 @@ export class HermesSourceApi {
     const promptFile = path.join(tmpDir, "prompt.txt");
     fs.writeFileSync(promptFile, prompt, "utf8");
 
-    const fullArgs = [
-      "infer", "model", "run",
-      "--prompt", `@${promptFile}`,
-      "--json",
-      "--local",
-    ];
+ // Hermes CLI: hermes chat -q "$(cat promptFile)" --quiet --source tool
+ // OpenClaw CLI: openclaw infer model run --prompt @file --json --local
+ const isOpenClaw = agent.executable === "openclaw" || (agent.name && agent.name.toLowerCase().includes("openclaw"));
 
-    let command, args, options;
+ // For Hermes: we need shell to expand $(cat file) for the -q argument
+ // since hermes chat doesn't support @file syntax
+ const hermesShellArg = `"$(cat '${promptFile.replace(/'/g, "'\\''")}')"`; // shell-safe: single-quote the path
 
-    if (agent.launchShellCommand) {
-      const shellArgs = parseShellWords(agent.launchShellCommand);
-      if (!shellArgs.length) {
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-        throw new Error(`Invalid ${agent.name} command override`);
-      }
-      command = shellArgs[0];
-      args = [...shellArgs.slice(1), ...fullArgs];
-      options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: false };
-    } else if (agent.launchCommand === "node") {
-      command = "node";
-      args = [...(agent.launchArgsPrefix || []), ...fullArgs];
-      options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: false };
-    } else {
-      command = agent.launchCommand || agent.executable;
-      args = [...(agent.launchArgsPrefix || []), ...fullArgs];
-      options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
-    }
+ let command, args, options;
+
+ if (agent.launchShellCommand) {
+ const shellArgs = parseShellWords(agent.launchShellCommand);
+ if (!shellArgs.length) {
+ try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+ throw new Error(`Invalid ${agent.name} command override`);
+ }
+ command = shellArgs[0];
+ if (isOpenClaw) {
+ args = [...shellArgs.slice(1), "infer", "model", "run", "--prompt", `@${promptFile}`, "--json", "--local"];
+ } else {
+ args = [...shellArgs.slice(1), "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
+ }
+ options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
+ } else if (agent.launchCommand === "node") {
+ command = "node";
+ if (isOpenClaw) {
+ args = [...(agent.launchArgsPrefix || []), "infer", "model", "run", "--prompt", `@${promptFile}`, "--json", "--local"];
+ } else {
+ // node entry.mjs chat -q "$(cat file)" --quiet --source tool
+ args = [...(agent.launchArgsPrefix || []), "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
+ }
+ options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
+ } else {
+ command = agent.launchCommand || agent.executable;
+ if (isOpenClaw) {
+ args = [...(agent.launchArgsPrefix || []), "infer", "model", "run", "--prompt", `@${promptFile}`, "--json", "--local"];
+ } else {
+ args = [...(agent.launchArgsPrefix || []), "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
+ }
+ options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
+ }
 
     const fullCmd = `${command} ${args.join(" ")}`;
     console.log(`[AgentDiscovery] ════════════════════════════════════════════`);
