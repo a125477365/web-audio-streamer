@@ -7,7 +7,7 @@ import os from "os";
 import path from "path";
 
 const DEFAULT_PROVIDER = "netease";
-const DEFAULT_TEST_SONG = "Jay Chou";
+const DEFAULT_TEST_SONG = "周杰伦 搁浅";
 const SOURCE_RESULT_FILE =
   process.env.SOURCE_RESULT_FILE ||
   path.join(os.tmpdir(), "web-audio-streamer-source-progress.json");
@@ -15,17 +15,17 @@ const SOURCE_CONFIG_FILE =
   process.env.SOURCE_CONFIG_PATH ||
   path.join(os.homedir(), ".openclaw", "web-audio-streamer", "source-config.json");
 
-const MAX_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_TIMEOUT_MS = 15 * 60 * 1000;
 const POLL_INTERVAL_MS = 30 * 1000;
-const AGENT_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
-const VALIDATED_TARGET = 10;
-const DISCOVERY_TARGET = 30;
-const MAX_DISCOVERY_ROUNDS = 3;
+const AGENT_COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
+const VALIDATED_TARGET = 8;
+const DISCOVERY_TARGET = 15;
+const MAX_DISCOVERY_ROUNDS = 2;
 const MAX_RETRY_ROUNDS = 2;
-const MIN_FULL_DURATION_SEC = 90;
-const CONFIG_VERSION = 13;
+const MIN_FULL_DURATION_SEC = 180;
+const CONFIG_VERSION = 14;
 const NXVAV_TOKEN = "nxvav";
-const TEST_QUERIES = ["周杰伦", "林俊杰", "Taylor Swift"];
+const TEST_QUERIES = ["周杰伦 搁浅"];
 const REQUEST_STYLES = ["server", "server-keyword", "media", "type-only", "q", "keyword"];
 
 function wait(ms) {
@@ -559,93 +559,200 @@ export class HermesSourceApi {
     });
   }
 
-  async _discoverSourceCandidates(task, agent, testSong, excludedUrls = [], desiredCount = DISCOVERY_TARGET, round = 1, currentCount = 0) {
-    const prompt = this._buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount, round, currentCount);
-    const responseText = await this._runAgentCommand(task, agent, prompt);
-    const payload = this._extractAgentPayload(responseText);
-    const rawCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+ async _discoverSourceCandidates(task, agent, testSong, excludedUrls = [], desiredCount = DISCOVERY_TARGET, round = 1, currentCount = 0) {
+ const prompt = this._buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount, round, currentCount);
+ const responseText = await this._runAgentCommand(task, agent, prompt);
 
-    const candidates = rawCandidates
-      .map((item) => this._normalizeCandidate(item))
-      .filter(Boolean);
+ let payload;
+ let usedProbeFallback = false;
+ try {
+ payload = this._extractAgentPayload(responseText);
+ } catch (extractError) {
+ // 主请求解析失败，检查是否有询问请求的备用结果
+ if (task._probeCandidates?.length > 0) {
+ console.log(`[AgentDiscovery] 主请求解析失败，使用询问请求的 ${task._probeCandidates.length} 个备用候选`);
+ payload = {
+ success: true,
+ message: `主请求失败，使用询问结果：${extractError.message}`,
+ candidates: task._probeCandidates,
+ manualActionRequired: false,
+ manualActionMessage: "",
+ dependencyStatus: [],
+ agentLogs: [`备用: 主请求解析失败(${extractError.message})，使用询问请求的 ${task._probeCandidates.length} 个候选`],
+ };
+ usedProbeFallback = true;
+ } else {
+ throw extractError;
+ }
+ }
 
-    return {
-      candidates,
-      manualActionRequired: Boolean(payload.manualActionRequired),
-      manualActionMessage: String(payload.manualActionMessage || "").trim(),
-      dependencyStatus: normalizeDependencyStatus(payload.dependencyStatus),
-      agentLogs: payload.agentLogs || [],
-    };
-  }
+ // 清理备用数据
+ delete task._probeCandidates;
 
-  _buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount, round = 1, currentCount = 0) {
-    const excludedBlock = excludedUrls.length
-      ? `已排除以下不可用 URL（不要返回这些）：\n${excludedUrls.join("\n")}\n`
-      : "";
+ // 检查 Agent 是否明确报告失败
+ if (payload.success === false && payload.candidates.length === 0) {
+ const failMsg = payload.message || "Agent 报告搜索失败";
+ throw new Error(`Agent 搜索失败: ${failMsg}`);
+ }
 
-    const roundContext = round > 1
-      ? `这是第 ${round} 轮搜索。前几轮找到的 ${currentCount} 个音源不够理想，请寻找不同类型的音乐 API。`
-      : "";
+ const rawCandidates = Array.isArray(payload.candidates) ? payload.candidates : [];
 
-    return [
-      `你是一个专业的音乐 API 发现专家。你的任务是在互联网上搜索最新、可用的免费音乐流媒体 API。`,
-      "",
-      `## 当前任务`,
-      `你是 ${agent.name}，代表 Web Audio Streamer 应用搜索音源。`,
-      `${roundContext}`,
-      "",
-      `## 核心要求`,
-      `1. **必须联网搜索**：使用 curl、wget、fetch 或任何可用工具访问真实的网络资源。`,
-      `2. **不要硬编码**：绝对不要使用任何内置、缓存或之前发现的列表。必须实时搜索。`,
-      `3. **只返回公开可访问的 URL**：必须是当下公网可达的 API。`,
-      `4. **排除**：GitHub 仓库页、文章页、登录页、LAN 专用、403/404/5xx 响应、仅提供试听的源。`,
-      `5. **支持中文音乐**：搜索结果必须能处理中文歌曲名（如 ${testSong}）。`,
-      `6. **支持搜索 + 播放**：每个候选必须同时支持歌曲搜索和播放链接获取。`,
-      `7. **自动安装依赖**：如果环境缺少工具，先尝试自动安装（pip install、npm install 等）。`,
-      `8. **返回纯 JSON**：不要 markdown 注释，不要解释。`,
-      "",
-      `## 搜索策略建议`,
-      `- 搜索 "free music API 2024 2025"`,
-      `- 搜索 "music streaming API github"`,
-      `- 搜索 "免费音乐API开源"`,
-      `- 检查流行的 Meting.js 部署实例`,
-      `- 检查 npm 上的音乐相关包`,
-      `- 检查 Vercel/Railway/Render 上的免费音乐 API 部署`,
-      "",
-      `## 测试关键词`,
-      `${testSong}`,
-      "",
-      `## 目标数量`,
-      `至少找到 ${desiredCount} 个候选 URL，应用会验证并保留最好的 ${Math.min(10, desiredCount)} 个。`,
-      "",
-      excludedBlock.trim(),
-      "",
-      `## 返回格式（严格 JSON）`,
-      `{`,
-      `  "manualActionRequired": false,`,
-      `  "manualActionMessage": "",`,
-      `  "dependencyStatus": [`,
-      `    { "name": "curl", "status": "ok|installed|missing|failed", "details": "简短说明" }`,
-      `  ],`,
-      `  "agentLogs": ["搜索步骤日志，如：正在搜索 GitHub...", "找到候选: xxx"]`,
-      `  "candidates": [`,
-      `    {`,
-      `      "name": "可读名称",`,
-      `      "searchUrl": "https://api.example.com/search",`,
-      `      "requestStyle": "server",`,
-      `      "needsAuth": false,`,
-      `      "reason": "为什么这个看起来可用",`,
-      `      "detectedFrom": "从哪里发现（如：GitHub搜索、npm包、Vercel部署）"`,
-      `    }`,
-      `  ]`,
-      `}`,
-      "",
-      `requestStyle 可选值: "server", "server-keyword", "media", "type-only", "q", "keyword"`,
-      `如果找不到足够候选，返回你确认的所有真实可用 API。`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
+ const candidates = rawCandidates
+ .map((item) => this._normalizeCandidate(item))
+ .filter(Boolean);
+
+ return {
+ candidates,
+ manualActionRequired: Boolean(payload.manualActionRequired),
+ manualActionMessage: String(payload.manualActionMessage || "").trim(),
+ dependencyStatus: normalizeDependencyStatus(payload.dependencyStatus),
+ agentLogs: payload.agentLogs || [],
+ };
+ }
+
+ _buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount, round = 1, currentCount = 0) {
+ const excludedBlock = excludedUrls.length
+ ? `已排除以下不可用 URL（不要返回这些）：\n${excludedUrls.join("\n")}\n`
+ : "";
+
+ const roundContext = round > 1
+ ? `这是第 ${round} 轮搜索。前几轮找到的 ${currentCount} 个音源不够理想，请寻找不同类型的音乐 API。`
+ : "";
+
+ return [
+ `你是一个专业的音乐 API 发现专家。你的任务是在互联网上搜索最新、可用的免费音乐流媒体 API。`,
+ "",
+ `## 当前任务`,
+ `你是 ${agent.name}，代表 Web Audio Streamer 应用搜索音源。`,
+ `${roundContext}`,
+ "",
+ `## 搜索方式（必须遵守）`,
+ `你必须使用 Chromium 无头浏览器搜索互联网。具体步骤：`,
+ `1. 检查系统是否已安装 chromium 或 google-chrome：执行 which chromium || which chromium-browser || which google-chrome`,
+ `2. 如果未安装，则自行安装：`,
+ ` - Debian/Ubuntu: apt-get update && apt-get install -y chromium-browser 或 chromium`,
+ ` - Alpine: apk add chromium`,
+ ` - CentOS/RHEL: yum install -y chromium`,
+ ` - 如果 apt 源不可用，尝试 snap install chromium 或从 PPA 安装`,
+ `3. 安装完成后，使用无头模式搜索：`,
+ ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://www.google.com/search?q=免费音乐API+2025&tbs=qdr:m"`,
+ ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=NeteaseCloudMusicApi+deploy&type=repositories&s=updated&o=desc"`,
+ ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=meting+api&type=repositories&s=updated&o=desc"`,
+ `4. 也可以结合 curl 辅助验证 URL 可达性，但主要发现必须通过浏览器搜索完成`,
+ `5. 如果浏览器搜索获取到页面内容，从中提取 API 部署地址`,
+ "",
+ `## 音源地址格式说明`,
+ `你搜索到的音源 URL 必须是洛雪音乐助手(LX Music)兼容的 API 端点，常见格式如下：`,
+ "",
+ `### 1. NeteaseCloudMusicApi 类型（最常见）`,
+ `URL 格式: https://xxx.vercel.app 或 https://xxx.onrender.com 等`,
+ `搜索接口: GET ?server=netease&type=search&id=周杰伦%20搁浅`,
+ `播放接口: GET ?server=netease&type=url&id=歌曲ID`,
+ `requestStyle 填: "server"`,
+ "",
+ `### 2. Meting API 类型`,
+ `URL 格式: https://xxx.vercel.app/api/meting 或 https://meting-api.xxx.workers.dev`,
+ `搜索接口: GET ?server=netease&type=search&id=周杰伦%20搁浅`,
+ `播放接口: GET ?server=netease&type=url&id=歌曲ID`,
+ `requestStyle 填: "server"`,
+ "",
+ `### 3. 自定义类型`,
+ `URL 格式: 各种 API 部署地址`,
+ `搜索接口: GET ?type=search&id=关键词 或 ?q=关键词 或 ?keyword=关键词`,
+ `requestStyle 填: "type-only" / "q" / "keyword"`,
+ "",
+ `### ⚠️ URL 必须是 API 端点，不是仓库页面`,
+ `❌ 错误: https://github.com/xxx/NeteaseCloudMusicApi`,
+ `❌ 错误: https://github.com/xxx/lx-music-source`,
+ `✅ 正确: https://netease-cloud-music-api-xxx.vercel.app`,
+ `✅ 正确: https://meting-api-xxx.onrender.com`,
+ "",
+ `## 核心要求`,
+ `1. **必须用 Chromium 无头浏览器联网搜索**：不要只用 curl，浏览器能看到更完整的搜索结果。`,
+ `2. **不要硬编码**：绝对不要使用任何内置、缓存或之前发现的列表。必须实时搜索。`,
+ `3. **只返回公开可访问的 API 端点 URL**：必须是当下公网可达的 API（不是仓库页面）。`,
+ `4. **排除**：GitHub 仓库页、文章页、登录页、LAN 专用、403/404/5xx 响应、仅提供试听的源。`,
+ `5. **验证标准**：每个候选 API 必须能搜索"周杰伦 搁浅"并返回时长≥3分钟(180秒)的完整歌曲，文件越大越好（无损优先）。`,
+ `6. **按发布时间排序**：优先搜索最新发布的 API 部署，优先返回近期创建/更新的实例。`,
+ `7. **精简高效**：找到 ${desiredCount} 个候选即可停止，不要过度扫描。`,
+ `8. **最后只输出一个 JSON 结果块**：所有搜索日志放 agentLogs，最终音源列表放 candidates，不要在 JSON 之外写任何额外解释。`,
+ "",
+ `## 搜索策略建议`,
+ `- 用 Chromium 访问 Google 搜索 "free music API 2024 2025" 并按时间排序`,
+ `- 用 Chromium 访问 GitHub 搜索 "NeteaseCloudMusicApi vercel" 按最近更新排序`,
+ `- 用 Chromium 访问 GitHub 搜索 "meting api deploy" 按最新排序`,
+ `- 用 Chromium 访问 Google 搜索 "免费音乐API开源 2025"`,
+ `- 优先检查最近创建的 Vercel/Railway/Render 部署`,
+ `- 用 curl 逐一验证找到的 API 端点是否可达、能搜索`,
+ "",
+ `## 测试歌曲`,
+ `验证歌曲：周杰伦 - 搁浅（时长必须≥3分钟/180秒，无损文件越大越好）`,
+ "",
+ `## 目标数量`,
+ `找到 ${desiredCount} 个候选 URL 即可（按发布时间从新到旧排列），应用会验证并保留最好的 ${Math.min(8, desiredCount)} 个。`,
+ "",
+ excludedBlock.trim(),
+ "",
+ `## 返回格式（严格 JSON，整个输出中只能有这一个 JSON）`,
+ `你的最终回复必须包含且仅包含以下 JSON 结构（可以先用文字记录搜索过程，但最后必须输出这个 JSON）：`,
+ "```json",
+ `{`,
+ ` "success": true,`,
+ ` "message": "搜索完成，找到 N 个候选",`,
+ ` "manualActionRequired": false,`,
+ ` "manualActionMessage": "",`,
+ ` "dependencyStatus": [`,
+ ` { "name": "chromium", "status": "ok|installed|missing|failed", "details": "简短说明" }`,
+ ` ],`,
+ ` "agentLogs": [`,
+ ` "步骤1: 正在检查 chromium...",`,
+ ` "步骤2: 正在安装 chromium...",`,
+ ` "步骤3: 用浏览器搜索 GitHub...",`,
+ ` "步骤4: 找到候选 https://xxx.vercel.app",`,
+ ` "步骤5: 用 curl 验证该 API 可达..."`,
+ ` ],`,
+ ` "candidates": [`,
+ ` {`,
+ ` "name": "NeteaseCloudMusicApi Vercel 实例",`,
+ ` "searchUrl": "https://netease-cloud-music-api-xxx.vercel.app",`,
+ ` "requestStyle": "server",`,
+ ` "needsAuth": false,`,
+ ` "confidence": 80,`,
+ ` "reason": "从 GitHub 搜索发现，Vercel 部署，curl 测试搜索返回结果",`,
+ ` "detectedFrom": "GitHub 搜索 NeteaseCloudMusicApi"`,
+ ` },`,
+ ` {`,
+ ` "name": "Meting API Render 实例",`,
+ ` "searchUrl": "https://meting-api-xxx.onrender.com",`,
+ ` "requestStyle": "server",`,
+ ` "needsAuth": false,`,
+ ` "confidence": 70,`,
+ ` "reason": "从 Google 搜索发现，Render 部署",`,
+ ` "detectedFrom": "Google 搜索 free music API"`,
+ ` }`,
+ ` ]`,
+ `}`,
+ "```",
+ "",
+ `### 字段说明`,
+ `- **success**: true=搜索成功找到候选，false=搜索失败（如网络不通、chromium装不上）`,
+ `- **message**: 一句话总结搜索结果`,
+ `- **confidence**: 0-100，你对这个 URL 可用性的把握程度`,
+ `- **requestStyle 可选值**: "server" | "server-keyword" | "media" | "type-only" | "q" | "keyword"`,
+ `- **searchUrl**: 必须是可直接发 HTTP 请求的 API 地址，不带查询参数`,
+ "",
+ `### 如果搜索失败`,
+ `如果 Chromium 安装失败或网络不通，返回：`,
+ "```json",
+ `{ "success": false, "message": "chromium 安装失败: xxx", "candidates": [], "agentLogs": [...] }`,
+ "```",
+ "",
+ `⚠️ 重要：JSON 必须是合法的、可被 JSON.parse() 直接解析的。不要有尾逗号、注释、或 markdown 代码块包裹（代码块标记可省略）。`,
+ `如果找不到足够候选，返回你确认的所有真实可用 API，success 仍为 true。`,
+ ]
+ .filter(Boolean)
+ .join("\n");
+ }
 
   _normalizeCandidate(item) {
     const searchUrl = this._normalizeBaseUrl(item?.searchUrl || item?.url || "");
@@ -724,6 +831,7 @@ export class HermesSourceApi {
 
  return new Promise((resolve) => {
  const timeoutMs = Math.min(this.maxTimeout, AGENT_COMMAND_TIMEOUT_MS);
+ const PROBE_INTERVAL_MS = 5 * 60 * 1000; // 每5分钟主动询问一次
  const body = JSON.stringify({
  model: "hermes-agent",
  messages: [{ role: "user", content: prompt }],
@@ -745,6 +853,65 @@ export class HermesSourceApi {
  timeout: timeoutMs,
  };
 
+ // 进度更新：API 模式是阻塞的，在等待期间周期性更新进度
+ let elapsedSeconds = 0;
+ const progressMessages = [
+ "Agent 正在联网搜索音乐 API...",
+ "Agent 正在搜索 Meting API 部署实例...",
+ "Agent 正在搜索 NeteaseCloudMusicApi 部署...",
+ "Agent 正在测试发现的 API 端点...",
+ "Agent 正在验证搜索和播放功能...",
+ "Agent 正在大规模发现更多端点...",
+ "Agent 正在深入测试可用性...",
+ "Agent 正在整理结果...",
+ ];
+ let progressInterval = null;
+ let probeInterval = null;
+ let resolved = false;
+
+ const cleanup = () => {
+ if (progressInterval) {
+ clearInterval(progressInterval);
+ progressInterval = null;
+ }
+ if (probeInterval) {
+ clearInterval(probeInterval);
+ probeInterval = null;
+ }
+ };
+
+ const doResolve = (value) => {
+ if (resolved) return;
+ resolved = true;
+ cleanup();
+ resolve(value);
+ };
+
+ // 进度更新定时器
+ if (task) {
+ progressInterval = setInterval(() => {
+ elapsedSeconds += 10;
+ const msgIndex = Math.min(
+ Math.floor(elapsedSeconds / 60),
+ progressMessages.length - 1
+ );
+ // 进度从 15% 缓慢增长到 85%（留空间给验证阶段）
+ const progress = Math.min(85, 15 + Math.floor(elapsedSeconds / 15));
+ this._updateTask(task, {
+ progress,
+ message: progressMessages[msgIndex],
+ });
+ console.log(`[AgentDiscovery] API 等待中... ${elapsedSeconds}s, 进度 ${progress}%`);
+ }, 10000); // 每10秒更新一次
+
+ // 主动询问 Agent 结果（防止会话断开导致丢失进度）
+ probeInterval = setInterval(() => {
+ if (resolved) return;
+ console.log(`[AgentDiscovery] Agent 长时间未响应 (${elapsedSeconds}s)，发送询问请求...`);
+ this._sendProbeRequest(url, apiKey, task).catch(() => {});
+ }, PROBE_INTERVAL_MS);
+ }
+
  const req = httpModule.request(reqOpts, (res) => {
  let data = "";
  res.on("data", (chunk) => { data += chunk.toString(); });
@@ -753,29 +920,113 @@ export class HermesSourceApi {
  try {
  const json = JSON.parse(data);
  const content = json.choices?.[0]?.message?.content || "";
- console.log(`[AgentDiscovery] <<< API 响应 (${content.length} chars)`);
- resolve(content);
+ console.log(`[AgentDiscovery] <<< API 响应 (${content.length} chars, ${elapsedSeconds}s)`);
+ doResolve(content);
  return;
  } catch (_) {}
  }
  // API failed, fall through to CLI
  console.log(`[AgentDiscovery] API 返回 ${res.statusCode}, 降级到 CLI 模式`);
- resolve(null);
+ doResolve(null);
  });
  });
 
  req.on("error", (err) => {
  console.log(`[AgentDiscovery] API 连接失败: ${err.message}, 降级到 CLI 模式`);
- resolve(null);
+ doResolve(null);
  });
 
  req.on("timeout", () => {
  req.destroy();
  console.log(`[AgentDiscovery] API 超时 (${Math.round(timeoutMs/1000)}s), 降级到 CLI 模式`);
- resolve(null);
+ doResolve(null);
  });
 
  req.write(body);
+ req.end();
+ });
+ }
+
+ /**
+ * 主动询问 Agent 当前进度（防止长时间未响应导致会话丢失）
+ * 这是一个独立的短超时请求，不会影响主请求
+ */
+ async _sendProbeRequest(url, apiKey, task) {
+ const probePrompt = [
+ "你正在执行音乐 API 搜索任务。",
+ "如果已经有了搜索结果，请立即按指定 JSON 格式输出你目前找到的所有候选。",
+ "如果还在搜索中，请回复：{\"success\":true,\"message\":\"正在搜索中，请稍等\",\"candidates\":[]}",
+ "如果你遇到了困难无法完成，请回复：{\"success\":false,\"message\":\"具体困难原因\",\"candidates\":[]}",
+ "重要：不要重复搜索，只汇总你目前已有结果即可。",
+ ].join("\n");
+
+ const probeBody = JSON.stringify({
+ model: "hermes-agent",
+ messages: [{ role: "user", content: probePrompt }],
+ max_tokens: 8192,
+ stream: false,
+ });
+
+ const httpModule = url.protocol === "https:" ? https : http;
+
+ return new Promise((resolve) => {
+ const req = httpModule.request({
+ hostname: url.hostname,
+ port: url.port,
+ path: url.pathname,
+ method: "POST",
+ headers: {
+ "Content-Type": "application/json",
+ "Authorization": `Bearer ${apiKey}`,
+ "Content-Length": Buffer.byteLength(probeBody),
+ },
+ timeout: 120000, // 2分钟超时（询问请求应该很快）
+ }, (res) => {
+ let data = "";
+ res.on("data", (chunk) => { data += chunk.toString(); });
+ res.on("end", () => {
+ if (res.statusCode === 200) {
+ try {
+ const json = JSON.parse(data);
+ const content = json.choices?.[0]?.message?.content || "";
+ console.log(`[AgentDiscovery] 询问请求返回 (${content.length} chars)`);
+
+ // 尝试从询问结果中提取有效音源
+ try {
+ const payload = this._extractAgentPayload(content);
+ if (payload.success && payload.candidates?.length > 0) {
+ console.log(`[AgentDiscovery] 询问请求获取到 ${payload.candidates.length} 个候选，保存为备用`);
+ // 将结果保存到 task 作为备用（不中断主请求）
+ task._probeCandidates = payload.candidates;
+ if (task) {
+ this._updateTask(task, {
+ message: `Agent 询问返回了 ${payload.candidates.length} 个候选（等待主请求完成...）`,
+ });
+ }
+ }
+ } catch (e) {
+ console.log(`[AgentDiscovery] 询问结果无法解析为音源: ${e.message}`);
+ }
+ } catch (_) {}
+ } else {
+ console.log(`[AgentDiscovery] 询问请求返回 ${res.statusCode}`);
+ }
+ resolve();
+ });
+ });
+
+ req.on("error", (err) => {
+ console.log(`[AgentDiscovery] 询问请求失败: ${err.message}`);
+ resolve();
+ });
+
+ req.on("timeout", () => {
+ req.destroy();
+ console.log(`[AgentDiscovery] 询问请求超时`);
+ resolve();
+ });
+
+ req.write(probeBody);
  req.end();
  });
  }
@@ -898,44 +1149,129 @@ export class HermesSourceApi {
     });
   }
 
-  _extractAgentPayload(rawOutput) {
-    const directJson = this._extractLastJsonValue(rawOutput);
-    if (Array.isArray(directJson)) {
-      return {
-        manualActionRequired: false,
-        manualActionMessage: "",
-        dependencyStatus: [],
-        agentLogs: [],
-        candidates: directJson,
-      };
-    }
+ _extractAgentPayload(rawOutput) {
+ // 策略1：直接找最后一个合法 JSON
+ const directJson = this._extractLastJsonValue(rawOutput);
 
-    if (directJson?.payloads) {
-      const combinedText = directJson.payloads
-        .map((payload) => payload?.text || "")
-        .join("\n")
-        .trim();
-      const nestedJson = this._extractLastJsonValue(combinedText);
-      if (Array.isArray(nestedJson)) {
-        return {
-          manualActionRequired: false,
-          manualActionMessage: "",
-          dependencyStatus: [],
-          agentLogs: [],
-          candidates: nestedJson,
-        };
-      }
-      if (nestedJson && typeof nestedJson === "object") {
-        return nestedJson;
-      }
-    }
+ // 如果是数组（旧格式兼容），包装为标准格式
+ if (Array.isArray(directJson)) {
+ return {
+ success: true,
+ message: `解析到 ${directJson.length} 个候选`,
+ manualActionRequired: false,
+ manualActionMessage: "",
+ dependencyStatus: [],
+ agentLogs: [],
+ candidates: directJson,
+ };
+ }
 
-    if (directJson && typeof directJson === "object") {
-      return directJson;
-    }
+ // 如果是对象，提取标准字段
+ if (directJson && typeof directJson === "object") {
+ // 处理 payloads 嵌套（Hermes ACP 格式）
+ if (directJson.payloads) {
+ const combinedText = directJson.payloads
+ .map((payload) => payload?.text || "")
+ .join("\n")
+ .trim();
+ const nestedJson = this._extractLastJsonValue(combinedText);
+ if (Array.isArray(nestedJson)) {
+ return {
+ success: true,
+ message: `解析到 ${nestedJson.length} 个候选`,
+ manualActionRequired: false,
+ manualActionMessage: "",
+ dependencyStatus: [],
+ agentLogs: [],
+ candidates: nestedJson,
+ };
+ }
+ if (nestedJson && typeof nestedJson === "object") {
+ return this._normalizePayload(nestedJson);
+ }
+ return {
+ success: false,
+ message: "Agent 返回的嵌套内容无法解析为有效音源列表",
+ candidates: [],
+ agentLogs: [],
+ };
+ }
 
-    throw new Error("Agent 返回格式无法解析。");
-  }
+ return this._normalizePayload(directJson);
+ }
+
+ // 策略2：从原始文本中逐行提取 URL（Agent 可能没返回 JSON，但提到了 API 地址）
+ const fallbackCandidates = this._extractUrlsFromText(rawOutput);
+ if (fallbackCandidates.length > 0) {
+ console.log(`[AgentDiscovery] JSON 解析失败，从文本中提取到 ${fallbackCandidates.length} 个 URL`);
+ return {
+ success: true,
+ message: `JSON 解析失败，从文本中提取到 ${fallbackCandidates.length} 个候选 URL`,
+ manualActionRequired: false,
+ manualActionMessage: "",
+ dependencyStatus: [],
+ agentLogs: [`fallback: 从原始文本提取 ${fallbackCandidates.length} 个 URL`],
+ candidates: fallbackCandidates,
+ };
+ }
+
+ throw new Error("Agent 返回格式无法解析，也未找到有效的 API URL。");
+ }
+
+ _normalizePayload(json) {
+ const success = json.success !== false; // undefined/true 都算成功
+ const candidates = Array.isArray(json.candidates) ? json.candidates : [];
+ const agentLogs = Array.isArray(json.agentLogs) ? json.agentLogs : [];
+ const dependencyStatus = Array.isArray(json.dependencyStatus) ? json.dependencyStatus : [];
+
+ // 过滤非音源数据：candidates 里只保留有 searchUrl 的项
+ const validCandidates = candidates.filter((item) => {
+ const url = item?.searchUrl || item?.url || "";
+ return url && /^https?:/i.test(url);
+ });
+
+ return {
+ success: success && validCandidates.length > 0,
+ message: String(json.message || "").trim() || (validCandidates.length > 0
+ ? `找到 ${validCandidates.length} 个候选`
+ : "Agent 未返回有效音源"),
+ manualActionRequired: Boolean(json.manualActionRequired),
+ manualActionMessage: String(json.manualActionMessage || "").trim(),
+ dependencyStatus,
+ agentLogs,
+ candidates: validCandidates,
+ };
+ }
+
+ _extractUrlsFromText(text) {
+ // 从文本中提取可能的音乐 API URL
+ const urlPattern = /https?:\/\/[^\s"'<>)\]]+/g;
+ const matches = String(text || "").match(urlPattern) || [];
+ const apiUrls = [];
+
+ for (const rawUrl of matches) {
+ const url = rawUrl.replace(/[.,;:!?\]}]+$/, "").replace(/\?+$/, ""); // 去除尾部标点
+ // 过滤：只要 API 端点，排除仓库页面、文章等
+ if (/github\.com\/[^/]+\/[^/]+$/i.test(url)) continue; // GitHub 仓库页
+ if (/github\.com\/[^/]+\/[^/]+\/(blob|tree|issues|pull)/i.test(url)) continue;
+ if (/npmjs\.com/i.test(url)) continue;
+ if (/stackoverflow|zhihu|csdn|juejin/i.test(url)) continue;
+ // 保留：可能是 API 部署的 URL
+ if (/vercel\.app|onrender\.com|railway\.app|herokuapp\.com|fly\.dev|workers\.dev|netlify\.app/i.test(url)) {
+ apiUrls.push({
+ name: url.split("/")[2].split(".")[0],
+ searchUrl: url,
+ requestStyle: "server",
+ needsAuth: false,
+ confidence: 40,
+ reason: "从 Agent 文本输出中提取的部署 URL",
+ detectedFrom: "文本提取 (fallback)",
+ });
+ }
+ }
+
+ return apiUrls;
+ }
 
   _extractLastJsonValue(text) {
     const cleaned = String(text || "").replace(/```json|```/gi, "").trim();
@@ -1009,88 +1345,111 @@ export class HermesSourceApi {
     return null;
   }
 
-  async _validateSourceWithStyle(candidate, requestStyle) {
-    const queryResults = [];
-    let bestPlayable = null;
-    let totalLatency = 0;
+ async _validateSourceWithStyle(candidate, requestStyle) {
+ const queryResults = [];
+ let bestPlayable = null;
+ let totalLatency = 0;
 
-    for (const query of TEST_QUERIES) {
-      const searchUrl = this._buildSearchUrl(candidate.searchUrl, requestStyle, query);
+ for (const query of TEST_QUERIES) {
+ const searchUrl = this._buildSearchUrl(candidate.searchUrl, requestStyle, query);
 
-      try {
-        const startedAt = Date.now();
-        const payload = await this._fetchJson(searchUrl);
-        const songs = this._extractSongs(payload);
-        totalLatency += Date.now() - startedAt;
-        if (!songs.length) continue;
+ try {
+ const startedAt = Date.now();
+ const payload = await this._fetchJson(searchUrl);
+ const songs = this._extractSongs(payload);
+ totalLatency += Date.now() - startedAt;
+ if (!songs.length) continue;
 
-        const playableSong = await this._findPlayableSong(candidate.searchUrl, requestStyle, songs);
-        if (!playableSong) continue;
+ const playableSong = await this._findPlayableSong(candidate.searchUrl, requestStyle, songs);
+ if (!playableSong) continue;
 
-        queryResults.push({ query, songs, playableSong });
-        if (!bestPlayable || playableSong.durationSec > bestPlayable.durationSec) {
-          bestPlayable = playableSong;
-        }
-      } catch {
-        continue;
-      }
-    }
+ queryResults.push({ query, songs, playableSong });
+ if (!bestPlayable || playableSong.durationSec > bestPlayable.durationSec) {
+ bestPlayable = playableSong;
+ }
+ } catch {
+ continue;
+ }
+ }
 
-    if (!queryResults.length || !bestPlayable) return null;
+ if (!queryResults.length || !bestPlayable) return null;
 
-    const averageLatency = Math.round(totalLatency / queryResults.length);
-    const averageResults = Math.round(
-      queryResults.reduce((sum, item) => sum + item.songs.length, 0) / queryResults.length,
-    );
-    const averageDuration = Math.round(
-      queryResults.reduce((sum, item) => sum + item.playableSong.durationSec, 0) / queryResults.length,
-    );
+ const averageLatency = Math.round(totalLatency / queryResults.length);
+ const averageResults = Math.round(
+ queryResults.reduce((sum, item) => sum + item.songs.length, 0) / queryResults.length,
+ );
+ const averageDuration = Math.round(
+ queryResults.reduce((sum, item) => sum + item.playableSong.durationSec, 0) / queryResults.length,
+ );
+ const fileSizeBytes = bestPlayable.fileSizeBytes || 0;
 
-    return {
-      name: candidate.name,
-      searchUrl: candidate.searchUrl,
-      requestStyle,
-      needsAuth: bestPlayable.needsAuth,
-      repo: candidate.detectedFrom || "Agent 发现",
-      description: candidate.notes || `${requestStyle} 模式`,
-      aiScore: this._scoreCandidate({
-        averageLatency,
-        averageResults,
-        averageDuration,
-        queryCount: queryResults.length,
-        confidence: candidate.confidence,
-      }),
-      verifiedAt: new Date().toISOString(),
-      sampleSong: bestPlayable.title,
-      sampleArtist: bestPlayable.artist,
-      sampleDurationSec: bestPlayable.durationSec,
-      samplePlayUrl: bestPlayable.playUrl,
-      queryCount: queryResults.length,
-      detectedFrom: candidate.detectedFrom || "",
-    };
-  }
+ return {
+ name: candidate.name,
+ searchUrl: candidate.searchUrl,
+ requestStyle,
+ needsAuth: bestPlayable.needsAuth,
+ repo: candidate.detectedFrom || "Agent 发现",
+ description: candidate.notes || `${requestStyle} 模式`,
+ aiScore: this._scoreCandidate({
+ averageLatency,
+ averageResults,
+ averageDuration,
+ queryCount: queryResults.length,
+ confidence: candidate.confidence,
+ fileSizeBytes,
+ }),
+ verifiedAt: new Date().toISOString(),
+ sampleSong: bestPlayable.title,
+ sampleArtist: bestPlayable.artist,
+ sampleDurationSec: bestPlayable.durationSec,
+ samplePlayUrl: bestPlayable.playUrl,
+ sampleFileSizeBytes: fileSizeBytes,
+ queryCount: queryResults.length,
+ detectedFrom: candidate.detectedFrom || "",
+ };
+ }
 
-  async _findPlayableSong(baseUrl, requestStyle, songs) {
-    const songCandidates = songs.slice(0, 8);
+ async _findPlayableSong(baseUrl, requestStyle, songs) {
+ const songCandidates = songs.slice(0, 8);
+ const validSongs = [];
 
-    for (const song of songCandidates) {
-      const playable = await this._resolvePlayableUrl(baseUrl, requestStyle, song);
-      if (!playable) continue;
+ for (const song of songCandidates) {
+ const playable = await this._resolvePlayableUrl(baseUrl, requestStyle, song);
+ if (!playable) continue;
 
-      const durationSec = this._extractDurationSec(song) || this._probeDuration(playable.url);
-      if (!durationSec || durationSec < MIN_FULL_DURATION_SEC) continue;
+ const durationSec = this._extractDurationSec(song) || this._probeDuration(playable.url);
+ if (!durationSec || durationSec < MIN_FULL_DURATION_SEC) continue;
 
-      return {
-        title: song.title || song.name || "Unknown Song",
-        artist: song.author || song.artist || "Unknown Artist",
-        durationSec,
-        playUrl: playable.url,
-        needsAuth: playable.needsAuth,
-      };
-    }
+ // 探测文件大小（无损越大越好）
+ const fileSizeBytes = await this._probeFileSize(playable.url);
 
-    return null;
-  }
+ // 匹配目标歌曲"搁浅"
+ const title = String(song.title || song.name || "").trim();
+ const isTargetSong = title.includes("搁浅");
+
+ validSongs.push({
+ title: song.title || song.name || "Unknown Song",
+ artist: song.author || song.artist || "Unknown Artist",
+ durationSec,
+ playUrl: playable.url,
+ needsAuth: playable.needsAuth,
+ fileSizeBytes,
+ isTargetSong,
+ });
+ }
+
+ if (!validSongs.length) return null;
+
+ // 优先选择"搁浅"，其次按时长+文件大小排序（无损文件越大越好）
+ validSongs.sort((a, b) => {
+ if (a.isTargetSong !== b.isTargetSong) return b.isTargetSong ? 1 : -1;
+ const aSize = a.fileSizeBytes || 0;
+ const bSize = b.fileSizeBytes || 0;
+ return (b.durationSec + bSize / 102400) - (a.durationSec + aSize / 102400);
+ });
+
+ return validSongs[0];
+ }
 
   _extractDurationSec(song) {
     const rawDuration = song?.duration ?? song?.time ?? null;
@@ -1100,24 +1459,30 @@ export class HermesSourceApi {
     return numericDuration;
   }
 
-  _scoreCandidate({ averageLatency, averageResults, averageDuration, queryCount, confidence }) {
-    let score = 40;
+ _scoreCandidate({ averageLatency, averageResults, averageDuration, queryCount, confidence, fileSizeBytes }) {
+ let score = 40;
 
-    if (queryCount >= 2) score += 15;
-    else if (queryCount === 1) score += 5;
+ if (queryCount >= 1) score += 10;
 
-    score += Math.min(averageResults, 20);
-    score += Math.min(15, Math.round((confidence || 0) / 10));
+ score += Math.min(averageResults, 15);
+ score += Math.min(15, Math.round((confidence || 0) / 10));
 
-    if (averageLatency < 1500) score += 15;
-    else if (averageLatency < 3000) score += 8;
+ if (averageLatency < 1500) score += 15;
+ else if (averageLatency < 3000) score += 8;
 
-    if (averageDuration >= 240) score += 10;
-    else if (averageDuration >= 180) score += 6;
-    else if (averageDuration >= 120) score += 3;
+ // 时长越大越好，无损文件通常更长
+ if (averageDuration >= 300) score += 20;
+ else if (averageDuration >= 240) score += 15;
+ else if (averageDuration >= 200) score += 10;
+ else if (averageDuration >= 180) score += 5;
 
-    return Math.max(1, Math.min(100, score));
-  }
+ // 文件大小加分（无损 > 10MB，高品质 > 5MB）
+ if (fileSizeBytes >= 10 * 1024 * 1024) score += 15;
+ else if (fileSizeBytes >= 5 * 1024 * 1024) score += 10;
+ else if (fileSizeBytes >= 2 * 1024 * 1024) score += 5;
+
+ return Math.max(1, Math.min(100, score));
+ }
 
   _buildSearchUrl(baseUrl, requestStyle, query, provider = DEFAULT_PROVIDER) {
     const encodedQuery = encodeURIComponent(query);
@@ -1281,19 +1646,52 @@ export class HermesSourceApi {
     });
   }
 
-  _probeDuration(url) {
-    try {
-      const output = execSync(
-        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${url}"`,
-        { timeout: 10000, encoding: "utf-8", shell: true },
-      ).trim();
-      const value = Number.parseFloat(output);
-      if (Number.isFinite(value) && value > 0) return value;
-    } catch {
-      return null;
-    }
-    return null;
-  }
+ _probeDuration(url) {
+ try {
+ const output = execSync(
+ `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${url}"`,
+ { timeout: 10000, encoding: "utf-8", shell: true },
+ ).trim();
+ const value = Number.parseFloat(output);
+ if (Number.isFinite(value) && value > 0) return value;
+ } catch {
+ return null;
+ }
+ return null;
+ }
+
+ async _probeFileSize(url) {
+ try {
+ // 方法1：HEAD 请求获取 Content-Length
+ const fileSize = await this._headFileSize(url);
+ if (fileSize && fileSize > 0) return fileSize;
+ } catch { /* fallthrough */ }
+
+ try {
+ // 方法2：ffprobe 获取文件大小
+ const output = execSync(
+ `ffprobe -v error -show_entries format=size -of default=noprint_wrappers=1:nokey=1 "${url}"`,
+ { timeout: 10000, encoding: "utf-8", shell: true },
+ ).trim();
+ const value = Number.parseInt(output, 10);
+ if (Number.isFinite(value) && value > 0) return value;
+ } catch { /* ignore */ }
+
+ return 0;
+ }
+
+ async _headFileSize(url) {
+ return new Promise((resolve) => {
+ const client = url.startsWith("https") ? https : http;
+ const req = client.request(url, { method: "HEAD" }, (res) => {
+ const contentLength = Number.parseInt(res.headers["content-length"], 10);
+ resolve(Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0);
+ });
+ req.setTimeout(8000, () => { req.destroy(); resolve(0); });
+ req.on("error", () => resolve(0));
+ req.end();
+ });
+ }
 
   _updateTask(task, patch) {
     Object.assign(task, patch, {
