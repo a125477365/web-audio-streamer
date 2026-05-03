@@ -183,56 +183,34 @@
             <div class="empty-state" v-else><div class="empty-icon">📁</div><div class="empty-text">选择目录开始播放</div></div>
           </template>
 
-          <!-- 在线搜索 -->
-          <template v-if="tab === 'online'">
-            <div class="search-box">
-              <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch">
+ <!-- 在线搜索 -->
+ <template v-if="tab === 'online'">
+ <div class="search-box">
+ <input class="search-input" v-model="searchQ" placeholder="搜索歌曲、歌手..." @keyup.enter="doSearch">
 <button class="btn btn-primary" @click="doSearch" :disabled="searching">🔍 {{ searching ? '搜索中...' : '搜索' }}</button>
-<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? (fetchMessage || '获取中...') : '获取音源' }}</button>
-<span v-if="fetchingSources && fetchProgress > 0" style="margin-left:10px;font-size:12px;color:#aaa;">{{ fetchProgress }}%</span>
-<button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换音源</button>
-<button class="btn btn-secondary btn-small" @click="showFetchLog = !showFetchLog" v-if="fetchLogs.length > 0" style="margin-left:4px;">📋 日志</button>
-            </div>
-            <div v-if="showFetchLog && fetchLogs.length > 0" style="margin-bottom:16px;">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                <span style="font-size:13px;color:#888;">🤖 Agent 交互日志</span>
-                <button class="btn btn-secondary btn-small" @click="fetchLogs = []">清空</button>
-              </div>
-              <div class="fetch-log-panel" ref="logPanel">
-                <div v-for="(log, i) in fetchLogs" :key="i" class="log-line" :class="'log-' + (log.level || 'info')">
-                  <span class="log-time">{{ log.time || '' }}</span>{{ log.message || '' }}
-                </div>
-              </div>
-            </div>
-            </div>
-            <div class="source-badge" v-if="currentSource">
-              <div><span style="color:#4CAF50;">✓</span> 当前音源: <b>{{ currentSource.name }}</b> <span v-if="currentSource.aiScore" style="color:#888;">(AI评分: {{ currentSource.aiScore }})</span></div>
-              <button class="btn btn-small btn-secondary" @click="openSwitchModal">切换</button>
-            </div>
-            <div class="selection-bar" v-if="results.length > 0">
-              <button class="btn btn-small btn-secondary" @click="selOnline = selOnline.length === results.length ? [] : results.map(function(r){return r.id})">{{ selOnline.length === results.length ? '取消全选' : '全选' }}</button>
-              <span class="selection-count" v-if="selOnline.length > 0">已选 {{ selOnline.length }} 首</span>
-              <button class="btn btn-small btn-primary" @click="playSelectedOnline" v-if="selOnline.length > 0">▶ 播放选中</button>
-            </div>
-            <ul class="song-list" v-if="results.length > 0">
-              <li class="song-item" v-for="s in results" :key="s.id" @click="playOnline(s)">
-                <div class="song-check" :class="{ checked: selOnline.includes(s.id) }" @click.stop="toggleSelOnline(s.id)">{{ selOnline.includes(s.id) ? '☑' : '☐' }}</div>
-                <div class="song-info">
-                  <div class="song-title">{{ s.title }} <span v-if="s.isPreview===true" style="font-size:11px;color:#f59e0b;background:#2a2210;padding:1px 6px;border-radius:4px;margin-left:6px;">&#x26A0; 试听 {{ s.durationSec ? Math.round(s.durationSec)+'s' : '&lt;90s' }}</span><span v-else-if="s.isPreview===false && s.durationSec" style="font-size:10px;color:#4ade80;margin-left:6px;">&#x2713; 完整 {{ Math.round(s.durationSec)+'s' }}</span></div>
-                  <div class="song-artist">{{ s.artist }}</div>
-                  <div style="font-size:11px;color:#666;margin-top:2px;">
-                    <span v-if="s.durationSec">时长: {{ fmtDur(s.durationSec*1000) }}</span>
-                    <span v-else-if="s.duration">时长: {{ fmtDur(s.duration) }}</span>
-                    <span v-else>时长: --</span>
-                    <span style="margin-left:10px;" v-if="s.sizeText">大小: {{ s.sizeText }}</span>
-                  </div>
-                </div>
-                <div class="song-actions"><button class="btn btn-small btn-primary" @click.stop="playOnline(s)">▶</button></div>
-              </li>
-            </ul>
-            <div class="empty-state" v-else-if="searched"><div class="empty-icon">🔍</div><div class="empty-text">没有找到结果</div></div>
-            <div class="empty-state" v-else><div class="empty-icon">🌐</div><div class="empty-text">搜索在线音乐</div><div class="empty-hint" v-if="!currentSource">首次安装将自动通过 Hermes API 获取音源</div></div>
-          </template>
+ </div>
+ <div class="selection-bar" v-if="results.length > 0">
+ <button class="btn btn-small btn-secondary" @click="selOnline = selOnline.length === results.length ? [] : results.map(function(r){return r.id})">{{ selOnline.length === results.length ? '取消全选' : '全选' }}</button>
+ <span class="selection-count" v-if="selOnline.length > 0">已选 {{ selOnline.length }} 首</span>
+ <button class="btn btn-small btn-primary" @click="playSelectedOnline" v-if="selOnline.length > 0">▶ 播放选中</button>
+ </div>
+ <ul class="song-list" v-if="results.length > 0">
+ <li class="song-item" v-for="s in results" :key="s.id" @click="playOnline(s)">
+ <div class="song-check" :class="{ checked: selOnline.includes(s.id) }" @click.stop="toggleSelOnline(s.id)">{{ selOnline.includes(s.id) ? '☑' : '☐' }}</div>
+ <div class="song-info">
+ <div class="song-title">{{ s.title }} <span v-if="s.sourceName" style="font-size:10px;color:#888;background:#1a1a2e;padding:1px 6px;border-radius:4px;margin-left:6px;">{{ s.sourceName }}</span></div>
+ <div class="song-artist">{{ s.artist }}</div>
+ <div style="font-size:11px;color:#666;margin-top:2px;">
+ <span v-if="s.duration">时长: {{ fmtDur(s.duration * 1000) }}</span>
+ <span v-else>时长: --</span>
+ </div>
+ </div>
+ <div class="song-actions"><button class="btn btn-small btn-primary" @click.stop="playOnline(s)">▶</button></div>
+ </li>
+ </ul>
+ <div class="empty-state" v-else-if="searched"><div class="empty-icon">🔍</div><div class="empty-text">没有找到结果</div></div>
+ <div class="empty-state" v-else><div class="empty-icon">🌐</div><div class="empty-text">搜索在线音乐</div><div class="empty-hint">支持网易云、酷我、酷狗多平台搜索</div></div>
+ </template>
 
           <!-- 私人FM -->
           <template v-if="tab === 'fm'">
@@ -277,11 +255,11 @@
 
             <div style="background:#1a1a2e;padding:20px;border-radius:12px;border:1px solid #2a2a4a;">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;">
-<div style="font-weight:600;">🎯 音源设置</div>
-<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🤖 {{ fetchingSources ? '获取中...' : '获取音源' }}</button>
-<button class="btn btn-secondary" @click="openSwitchModal" v-if="candidates.length > 0">🔀 切换</button>
+<div style="font-weight:600;">🔧 音源插件管理</div>
+<button class="btn btn-accent" @click="doFetchSources" :disabled="fetchingSources">🔍 {{ fetchingSources ? '搜索中...' : '搜索最新音源' }}</button>
 <button class="btn btn-secondary btn-small" @click="showFetchLog = !showFetchLog" v-if="fetchLogs.length > 0" style="margin-left:4px;">📋 日志</button>
 </div>
+<div style="font-size:12px;color:#888;margin-bottom:12px;">JS 音源插件用于获取播放链接，搜索由内置 SDK 实现（网易云/酷我/酷狗）。已加载 <b>{{ lxPlugins.length }}</b> 个插件。</div>
 <div v-if="showFetchLog && fetchLogs.length > 0" style="margin-bottom:16px;">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
     <span style="font-size:13px;color:#888;">🤖 Agent 交互日志</span>
@@ -294,38 +272,38 @@
   </div>
 </div>
 
-              <div v-if="currentSource" style="padding:10px 12px;border:1px solid #2a2a4a;border-radius:10px;background:#151526;margin-bottom:12px;">
-                <div style="font-size:13px;">
-                  <span style="color:#4CAF50;">✓</span> 当前使用音源:
-                  <b>{{ currentSource.name }}</b>
-                  <span v-if="currentSource.aiScore" style="color:#888;">(AI评分: {{ currentSource.aiScore }})</span>
-                </div>
-                <div style="font-size:12px;color:#666;margin-top:4px;">{{ currentSource.description || '' }}</div>
-              </div>
-              <div v-else style="font-size:13px;color:#666;margin-bottom:12px;">当前未选择音源，首次搜索时将自动通过 Hermes API 获取。</div>
-
-              <div style="font-size:12px;color:#888;margin-bottom:8px;">
-                <span>已获取的候选音源（点击可直接切换）</span>
-              </div>
-
-              <div v-if="candidates.length === 0" style="font-size:13px;color:#666;">暂无候选音源，请点击「获取音源(Hermes)」或直接搜索歌曲自动获取。</div>
-
-              <div v-for="(s, i) in candidates" :key="s.searchUrl || i"
-                   class="source-card"
-                   :class="{ selected: currentSource && currentSource.searchUrl === s.searchUrl }"
-                   @click="switchTo(s)">
-                <div style="display:flex;align-items:center;gap:12px;">
-                  <div class="source-rank">{{ i + 1 }}</div>
-                  <div style="flex:1;min-width:0;">
-                    <div style="font-weight:600;font-size:14px;">{{ s.name || '未知' }} <span v-if="currentSource && currentSource.searchUrl === s.searchUrl" style="color:#4CAF50;">✓</span></div>
-                    <div style="font-size:12px;color:#888;margin-top:2px;">{{ s.description || '' }}</div>
-                    <div style="font-size:11px;color:#666;margin-top:4px;">
-                      <span v-if="s.maxDuration">最长: {{ Math.round(s.maxDuration) }}秒</span>
-                      <span v-if="s.resultCount" style="margin-left:8px;">结果: {{ s.resultCount }}条</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+ <div v-if="lxPlugins.length > 0" style="margin-bottom:12px;">
+ <div style="font-size:12px;color:#888;margin-bottom:8px;">已加载的 JS 音源插件 — 点击 <b>选中</b> 设为优先，点击右上角 <b>开关</b> 启用/禁用</div>
+ <div v-for="(p, i) in lxPlugins" :key="p.name + p.version + i"
+ class="source-card"
+ :class="{ selected: p.name === preferredPlugin }"
+ style="cursor:pointer;position:relative;" @click="selectPlugin(p)">
+ <div style="display:flex;align-items:center;gap:12px;">
+ <div class="source-rank">{{ i + 1 }}</div>
+ <div style="flex:1;min-width:0;">
+ <div style="font-weight:600;font-size:14px;">
+ {{ p.name || '未知' }}
+ <span style="color:#888;font-size:12px;font-weight:normal;">{{ p.version || '' }}</span>
+ <span v-if="p.name === preferredPlugin" style="color:#7c3aed;font-size:12px;">⭐ 优先</span>
+ <span v-else-if="p.initialized && p.enabled" style="color:#4CAF50;font-size:12px;">✓ 已就绪</span>
+ <span v-else-if="!p.enabled" style="color:#666;font-size:12px;">⏸ 已禁用</span>
+ <span v-else style="color:#f44336;font-size:12px;">✗ 未初始化</span>
+ </div>
+ <div style="font-size:12px;color:#aaa;margin-top:3px;">
+ <span v-for="(src, si) in p.sources" :key="si">
+ <span style="background:#252545;padding:2px 8px;border-radius:4px;margin-right:4px;font-size:11px;" :style="{opacity: p.enabled ? 1 : 0.4}">{{ lxPlatformMap[src] || src }}</span>
+ </span>
+ </div>
+ </div>
+ <button style="padding:4px 8px;border-radius:6px;border:1px solid #3a3a5a;background:transparent;font-size:16px;cursor:pointer;"
+ :style="{color: p.enabled ? '#4CAF50' : '#666'}"
+ @click.stop="togglePlugin(p)" :title="p.enabled ? '点击禁用' : '点击启用'">
+ {{ p.enabled ? '◉' : '○' }}
+ </button>
+ </div>
+ </div>
+ </div>
+ <div v-else style="font-size:13px;color:#666;margin-bottom:12px;">暂无音源插件，请点击「刷新音源插件」自动从 GitHub 加载。</div>
             </div>
           </template>
         </div>
@@ -394,6 +372,7 @@
     var onUnmounted = Vue.onUnmounted;
     var watch = Vue.watch;
     var createApp = Vue.createApp;
+ var nextTick = Vue.nextTick;
 
     createApp({
       setup: function() {
@@ -429,8 +408,11 @@ var fetchingSources = ref(false);
 var fetchProgress = ref(0);
 var fetchMessage = ref('');
         var fetchTaskId = ref('');
-			var candidates = ref([]);
-			var showFetchLog = ref(false);
+	var candidates = ref([]);
+			var lxPlugins = ref([]);
+			var preferredPlugin = ref(null);
+		var lxPlatformMap = { wy: '网易云', kw: '酷我', kg: '酷狗', tx: 'QQ音乐', mg: '咪咕', local: '本地' };
+		var showFetchLog = ref(false);
 			var fetchLogs = ref([]);
 			var fetchStreamActive = ref(false);
 			var fetchStreamEta = ref('');
@@ -495,17 +477,24 @@ var fetchMessage = ref('');
         function apiPost(p, b) { return fetch('/api' + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }).then(function(r) { return r.json(); }); }
 
         // === Source Manager ===
-        function loadCurrentSource() {
-          apiGet('/source/status').then(function(res) {
-            if (!res.success) return;
-            currentSource.value = res.currentSource || null;
-            if (Array.isArray(res.candidates)) candidates.value = res.candidates;
-            if (res.needsSelection && candidates.value.length > 0) showSwitchModal.value = true;
-            if (res.manualActionRequired && res.manualActionMessage) {
-              fetchError.value = res.manualActionMessage;
-              showFetchError.value = true;
-            }
-          });
+ function loadCurrentSource() {
+ apiGet('/source/status').then(function(res) {
+ if (!res.success) return;
+ currentSource.value = res.currentSource || null;
+ if (Array.isArray(res.candidates)) candidates.value = res.candidates;
+ // 加载 LX 音源插件列表
+ if (res.lxRuntime && Array.isArray(res.lxRuntime.plugins)) {
+ lxPlugins.value = res.lxRuntime.plugins;
+ }
+ if (res.lxRuntime && res.lxRuntime.preferredPlugin) {
+ preferredPlugin.value = res.lxRuntime.preferredPlugin;
+ }
+ if (res.needsSelection && candidates.value.length > 0) showSwitchModal.value = true;
+ if (res.manualActionRequired && res.manualActionMessage) {
+ fetchError.value = res.manualActionMessage;
+ showFetchError.value = true;
+ }
+ });
  }
 
 // 新版获取音源：SSE 实时流式日志 + Agent 交互过程
@@ -530,12 +519,16 @@ function doFetchSources() {
   var es = new EventSource(proto + '//' + location.host + '/api/source/fetch/stream');
   fetchEventSource = es;
 
-  es.addEventListener('log', function(e) {
-    var entry = JSON.parse(e.data);
-    fetchLogs.value.push(entry);
-    // Auto-scroll
-    fetchProgress.value = Math.max(fetchProgress.value, 0);
-    // Update message from log
+ es.addEventListener('log', function(e) {
+ var entry = JSON.parse(e.data);
+ fetchLogs.value.push(entry);
+ // Auto-scroll like tail -f
+ nextTick(function() {
+ document.querySelectorAll('.fetch-log-panel').forEach(function(el) {
+ el.scrollTop = el.scrollHeight;
+ });
+ });
+ // Update message from log
     if (entry.message) {
       fetchMessage.value = entry.message;
       if (entry.message.includes('%') || entry.message.includes('进度')) {
@@ -561,22 +554,27 @@ function doFetchSources() {
       fetchProgress.value = 100;
       fetchMessage.value = data.message || ('发现 ' + (data.sourceCount || 0) + ' 个音源');
 
-      if (data.sources && data.sources.length > 0) {
-        candidates.value = data.sources.map(function(s) {
-          return {
-            name: s.name,
-            searchUrl: s.searchUrl || s.url,
-            requestStyle: s.requestStyle,
-            needsAuth: !!s.needsAuth,
-            quality: s.quality,
-            repo: s.repo,
-            aiScore: s.aiScore,
-            description: s.description
-          };
-        });
-        loadCurrentSource();
-        openSwitchModal();
-      }
+ if (data.sources && data.sources.length > 0) {
+ candidates.value = data.sources.map(function(s) {
+ return {
+ name: s.name,
+ searchUrl: s.searchUrl || s.url,
+ requestStyle: s.requestStyle,
+ needsAuth: !!s.needsAuth,
+ quality: s.quality,
+ repo: s.repo,
+ aiScore: s.aiScore,
+ description: s.description
+ };
+ });
+ loadCurrentSource();
+ openSwitchModal();
+ }
+ // LX 插件格式：刷新插件列表让用户选择/开关
+ if (data.plugins && data.plugins.length > 0) {
+ // 从后端获取最新插件状态（含 enabled/initialized）
+ loadCurrentSource();
+ }
     } else {
       fetchError.value = data.error || '获取失败';
       showFetchError.value = true;
@@ -602,29 +600,61 @@ function doFetchSources() {
           showSwitchModal.value = true;
         }
 
-        function switchTo(source) {
-          apiPost('/source/select', { source: source }).then(function(res) {
-            if (res.success) {
-              currentSource.value = res.source || source;
-              showSwitchModal.value = false;
-            }
-          });
-        }
+ function switchTo(source) {
+ apiPost('/source/select', { source: source }).then(function(res) {
+ if (res.success) {
+ currentSource.value = res.source || source;
+ showSwitchModal.value = false;
+ }
+ });
+ }
+
+ // 选择优先插件
+ function selectPlugin(p) {
+ var newName = (preferredPlugin.value === p.name) ? '' : p.name;
+ apiPost('/lx/plugins/prefer', { name: newName }).then(function(res) {
+ if (res.success) {
+ preferredPlugin.value = res.preferredPlugin || null;
+ // 同步刷新插件列表的 enabled 状态
+ lxPlugins.value = lxPlugins.value.slice();
+ }
+ });
+ }
+
+ // 切换插件启用/禁用
+ function togglePlugin(p) {
+ var newEnabled = !p.enabled;
+ apiPost('/lx/plugins/toggle', { name: p.name, enabled: newEnabled }).then(function(res) {
+ if (res.success) {
+ // 强制触发 Vue 响应式更新
+ lxPlugins.value = lxPlugins.value.map(function(x) {
+ if (x.name === p.name) return Object.assign({}, x, { enabled: newEnabled });
+ return x;
+ });
+ }
+ });
+ }
         // === Auto fetch on first install ===
-        function autoFetchIfNeeded() {
-          if (fetchingSources.value) return;
-          apiGet('/source/status').then(function(res) {
-            if (!res.success) return;
-            currentSource.value = res.currentSource || null;
-            if (Array.isArray(res.candidates)) candidates.value = res.candidates;
-            if (res.currentSource) return;
-            if (res.needsSelection && candidates.value.length > 0) {
-              showSwitchModal.value = true;
-              return;
-            }
-            if (!res.hasCandidates) doFetchSources();
-          });
-        }
+ function autoFetchIfNeeded() {
+ if (fetchingSources.value) return;
+ apiGet('/source/status').then(function(res) {
+ if (!res.success) return;
+ currentSource.value = res.currentSource || null;
+ if (Array.isArray(res.candidates)) candidates.value = res.candidates;
+ if (res.lxRuntime && Array.isArray(res.lxRuntime.plugins)) {
+ lxPlugins.value = res.lxRuntime.plugins;
+ }
+ if (res.lxRuntime && res.lxRuntime.preferredPlugin) {
+ preferredPlugin.value = res.lxRuntime.preferredPlugin;
+ }
+ if (res.currentSource) return;
+ if (res.needsSelection && candidates.value.length > 0) {
+ showSwitchModal.value = true;
+ return;
+ }
+ if (!res.hasCandidates) doFetchSources();
+ });
+ }
 
 
 
@@ -654,36 +684,22 @@ function doFetchSources() {
         function confirmDir() { if (!pendingDir.value) return; musicDir.value = pendingDir.value; apiPost('/local/save-path', { path: musicDir.value }); showDirPicker.value = false; selLocal.value = []; doScan(); }
         watch(showDirPicker, function(val) { if (val) { loadDirs(); pendingDir.value = musicDir.value; } });
 
-        // === Online Search (uses saved source) ===
-        function doSearch() {
-          if (!searchQ.value) return;
-          if (!hasSource.value) {
-            if (candidates.value.length > 0) {
-              showSwitchModal.value = true;
-              return;
-            }
-            if (!fetchingSources.value) {
-              doFetchSources();
-            }
-            return;
-          }
-          searching.value = true; searched.value = false;
-          apiGet('/source/search?q=' + encodeURIComponent(searchQ.value)).then(function(res) {
-            if (res.success) {
-              results.value = res.results || [];
-              searched.value = true; selOnline.value = [];
-              if (res.source && !currentSource.value) currentSource.value = res.source;
-            } else if (res.needSelect && Array.isArray(res.candidates)) {
-              candidates.value = res.candidates;
-              showSwitchModal.value = true;
-            } else if (res.needFetch && !fetchingSources.value) {
-              doFetchSources();
-            } else if (res.needRefresh) {
-              fetchError.value = res.message || 'Selected source is no longer usable.';
-              showFetchError.value = true;
-            }
-          }).finally(function() { searching.value = false; });
-        }
+ // === Online Search (内置 MusicSearchSdk，不依赖音源) ===
+function doSearch() {
+ if (!searchQ.value) return;
+ searching.value = true; searched.value = false;
+ apiGet('/online/search?q=' + encodeURIComponent(searchQ.value) + '&limit=30').then(function(res) {
+   if (res.success && Array.isArray(res.results)) {
+     results.value = res.results;
+     searched.value = true; selOnline.value = [];
+   } else if (res.success === false) {
+     results.value = [];
+     searched.value = true;
+     fetchError.value = res.error || '搜索失败';
+     showFetchError.value = true;
+   }
+ }).finally(function() { searching.value = false; });
+}
         function fmtDur(d) {
           // 支持秒或毫秒
           var sec = d > 10000 ? Math.floor(d/1000) : Math.floor(d);
@@ -692,11 +708,22 @@ function doFetchSources() {
           return m + ':' + (s2 < 10 ? '0' : '') + s2;
         }
 
-        function playOnline(s) {
-          var playUrl = s.playUrl || '';
-          var url = '/online/play?' + (playUrl ? 'url=' + encodeURIComponent(playUrl) : 'id=' + s.id);
-          apiGet(url).then(function(res) { if (res.success) track.value = { title: s.title, artist: s.artist, id: s.id }; });
-        }
+ function playOnline(s) {
+ // 先获取播放URL，再播放（搜索与播放解耦）
+ var params = 'id=' + encodeURIComponent(s.id || s.songmid);
+ if (s.source) params += '&source=' + encodeURIComponent(s.source);
+ if (s.hash) params += '&hash=' + encodeURIComponent(s.hash);
+ apiGet('/online/url?' + params).then(function(res) {
+   if (res.success && res.url) {
+     apiGet('/online/play?url=' + encodeURIComponent(res.url)).then(function(res2) {
+       if (res2.success) track.value = { title: s.title, artist: s.artist, id: s.id, source: s.source };
+     });
+   } else {
+     fetchError.value = '获取播放链接失败: ' + (res.error || '未知错误');
+     showFetchError.value = true;
+   }
+ });
+ }
         function toggleSelOnline(id) { var idx = selOnline.value.indexOf(id); if (idx >= 0) selOnline.value.splice(idx, 1); else selOnline.value.push(id); }
         function playSelectedOnline() {
           if (selOnline.value.length === 0) return;
@@ -774,14 +801,14 @@ function doFetchSources() {
           tab, tabTitle, track, status, volume, esp32, isLive,
           musicDir, dirName, songs, selLocal, scanning, sortBy, playingPath,
           searchQ, results, searching, searched, selOnline,
-          currentSource, showSwitchModal, showFetchError, fetchError, fetchingSources, candidates,
+          currentSource, showSwitchModal, showFetchError, fetchError, fetchingSources, candidates, lxPlugins, lxPlatformMap, preferredPlugin,
           showFetchLog, fetchLogs, fetchStreamActive,
           playlist, playlistIdx, playMode, showPlaylist, playModeIcon, playModeName, playModeTitle,
           favorites, isFav,
           fmPlaying, fmLoading,
           showDirPicker, dirs, dirLoading,
           radios, customRadioUrl,
-				loadCurrentSource, doFetchSources, openSwitchModal, switchTo, autoFetchIfNeeded,
+ loadCurrentSource, doFetchSources, openSwitchModal, switchTo, selectPlugin, togglePlugin, autoFetchIfNeeded,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
           doSearch, playOnline, toggleSelOnline, playSelectedOnline,

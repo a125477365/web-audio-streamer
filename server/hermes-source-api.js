@@ -15,13 +15,15 @@ const SOURCE_CONFIG_FILE =
   process.env.SOURCE_CONFIG_PATH ||
   path.join(os.homedir(), ".openclaw", "web-audio-streamer", "source-config.json");
 
-const MAX_TIMEOUT_MS = 15 * 60 * 1000;
-const POLL_INTERVAL_MS = 30 * 1000;
-const AGENT_COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
+const MAX_TIMEOUT_MS = 3 * 60 * 1000;
+const POLL_INTERVAL_MS = 10 * 1000;
+const AGENT_COMMAND_TIMEOUT_MS = 3 * 60 * 1000;
+const CLI_FALLBACK_TIMEOUT_MS = 2 * 60 * 1000;
+const GITHUB_FALLBACK_TIMEOUT_MS = 90 * 1000;
 const VALIDATED_TARGET = 8;
 const DISCOVERY_TARGET = 15;
-const MAX_DISCOVERY_ROUNDS = 2;
-const MAX_RETRY_ROUNDS = 2;
+const MAX_DISCOVERY_ROUNDS = 1;
+const MAX_RETRY_ROUNDS = 0;
 const MIN_FULL_DURATION_SEC = 180;
 const CONFIG_VERSION = 14;
 const NXVAV_TOKEN = "nxvav";
@@ -612,19 +614,23 @@ export class HermesSourceApi {
 
  _buildDiscoveryPrompt(agent, testSong, excludedUrls, desiredCount, round = 1, currentCount = 0) {
  const excludedBlock = excludedUrls.length
- ? `已排除以下不可用 URL（不要返回这些）：\n${excludedUrls.join("\n")}\n`
+ ? `已排除以下不可用仓库（不要返回这些）：\n${excludedUrls.join("\n")}\n`
  : "";
 
  const roundContext = round > 1
- ? `这是第 ${round} 轮搜索。前几轮找到的 ${currentCount} 个音源不够理想，请寻找不同类型的音乐 API。`
+ ? `这是第 ${round} 轮搜索。前几轮找到的 ${currentCount} 个仓库不够理想，请寻找不同的洛雪音源仓库。`
  : "";
 
  return [
- `你是一个专业的音乐 API 发现专家。你的任务是在互联网上搜索最新、可用的免费音乐流媒体 API。`,
+ `你是一个专业的洛雪音乐助手(LX Music)音源仓库发现专家。你的任务是在互联网上搜索最新、可用的洛雪音源 JS 插件仓库。`,
  "",
  `## 当前任务`,
- `你是 ${agent.name}，代表 Web Audio Streamer 应用搜索音源。`,
+ `你是 ${agent.name}，代表 Web Audio Streamer 应用搜索洛雪音源仓库。`,
  `${roundContext}`,
+ "",
+ `## 什么是洛雪音源仓库`,
+ `洛雪音乐助手(LX Music)使用 JS 插件来获取各平台的音乐播放链接。这些插件以 .js 文件形式存放在 GitHub 仓库中。`,
+ `仓库通常包含多个 .js 文件，每个文件对应一个音源（如网易云、酷我、酷狗、QQ、咪咕等）。`,
  "",
  `## 搜索方式（必须遵守）`,
  `你必须使用 Chromium 无头浏览器搜索互联网。具体步骤：`,
@@ -633,72 +639,58 @@ export class HermesSourceApi {
  ` - Debian/Ubuntu: apt-get update && apt-get install -y chromium-browser 或 chromium`,
  ` - Alpine: apk add chromium`,
  ` - CentOS/RHEL: yum install -y chromium`,
- ` - 如果 apt 源不可用，尝试 snap install chromium 或从 PPA 安装`,
  `3. 安装完成后，使用无头模式搜索：`,
- ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://www.google.com/search?q=免费音乐API+2025&tbs=qdr:m"`,
- ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=NeteaseCloudMusicApi+deploy&type=repositories&s=updated&o=desc"`,
- ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=meting+api&type=repositories&s=updated&o=desc"`,
- `4. 也可以结合 curl 辅助验证 URL 可达性，但主要发现必须通过浏览器搜索完成`,
- `5. 如果浏览器搜索获取到页面内容，从中提取 API 部署地址`,
+ ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=lx-music-source&type=repositories&s=stars&o=desc"`,
+ ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=lxmusic+音源&type=repositories&s=updated&o=desc"`,
+ ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://www.google.com/search?q=洛雪音乐+音源+github+2024+2025"`,
+ `4. 也可以结合 curl 辅助验证仓库可达性，但主要发现必须通过浏览器搜索完成`,
  "",
- `## 音源地址格式说明`,
- `你搜索到的音源 URL 必须是洛雪音乐助手(LX Music)兼容的 API 端点，常见格式如下：`,
+ `## 仓库格式说明`,
+ `你搜索到的必须是 GitHub 仓库地址，格式如下：`,
  "",
- `### 1. NeteaseCloudMusicApi 类型（最常见）`,
- `URL 格式: https://xxx.vercel.app 或 https://xxx.onrender.com 等`,
- `搜索接口: GET ?server=netease&type=search&id=周杰伦%20搁浅`,
- `播放接口: GET ?server=netease&type=url&id=歌曲ID`,
- `requestStyle 填: "server"`,
+ `### 正确格式（仓库地址）`,
+ `✅ 正确: { owner: "Huibq", repo: "keep-alive", branch: "main", distPath: "" }`,
+ `✅ 正确: { owner: "pdone", repo: "lx-music-source", branch: "main", distPath: "" }`,
+ `✅ 正确: { owner: "Macrohard0001", repo: "lx-ikun-music-sources", branch: "main", distPath: "" }`,
  "",
- `### 2. Meting API 类型`,
- `URL 格式: https://xxx.vercel.app/api/meting 或 https://meting-api.xxx.workers.dev`,
- `搜索接口: GET ?server=netease&type=search&id=周杰伦%20搁浅`,
- `播放接口: GET ?server=netease&type=url&id=歌曲ID`,
- `requestStyle 填: "server"`,
+ `### ❌ 错误格式（不要返回这些）`,
+ `❌ 错误: https://netease-cloud-music-api-xxx.vercel.app （这是API部署地址，不是仓库）`,
+ `❌ 错误: https://meting-api-xxx.onrender.com （这是API部署地址，不是仓库）`,
+ `❌ 错误: https://github.com/xxx/NeteaseCloudMusicApi （这是后端API项目，不是洛雪音源）`,
  "",
- `### 3. 自定义类型`,
- `URL 格式: 各种 API 部署地址`,
- `搜索接口: GET ?type=search&id=关键词 或 ?q=关键词 或 ?keyword=关键词`,
- `requestStyle 填: "type-only" / "q" / "keyword"`,
- "",
- `### ⚠️ URL 必须是 API 端点，不是仓库页面`,
- `❌ 错误: https://github.com/xxx/NeteaseCloudMusicApi`,
- `❌ 错误: https://github.com/xxx/lx-music-source`,
- `✅ 正确: https://netease-cloud-music-api-xxx.vercel.app`,
- `✅ 正确: https://meting-api-xxx.onrender.com`,
+ `## distPath 说明`,
+ `- 如果仓库根目录就有 .js 文件，distPath 填 ""`,
+ `- 如果 .js 文件在子目录（如 dist/），distPath 填 "dist"`,
+ `- 不确定时填 ""，系统会自动扫描子目录`,
  "",
  `## 核心要求`,
  `1. **必须用 Chromium 无头浏览器联网搜索**：不要只用 curl，浏览器能看到更完整的搜索结果。`,
  `2. **不要硬编码**：绝对不要使用任何内置、缓存或之前发现的列表。必须实时搜索。`,
- `3. **只返回公开可访问的 API 端点 URL**：必须是当下公网可达的 API（不是仓库页面）。`,
- `4. **排除**：GitHub 仓库页、文章页、登录页、LAN 专用、403/404/5xx 响应、仅提供试听的源。`,
- `5. **验证标准**：每个候选 API 必须能搜索"周杰伦 搁浅"并返回时长≥3分钟(180秒)的完整歌曲，文件越大越好（无损优先）。`,
- `6. **按发布时间排序**：优先搜索最新发布的 API 部署，优先返回近期创建/更新的实例。`,
- `7. **精简高效**：找到 ${desiredCount} 个候选即可停止，不要过度扫描。`,
- `8. **最后只输出一个 JSON 结果块**：所有搜索日志放 agentLogs，最终音源列表放 candidates，不要在 JSON 之外写任何额外解释。`,
+ `3. **只返回 GitHub 仓库**：必须是包含洛雪音源 JS 插件的 GitHub 仓库（不是 API 部署地址）。`,
+ `4. **排除**：非音源仓库、后端 API 项目(NeteaseCloudMusicApi等)、纯文档仓库、archived 仓库。`,
+ `5. **验证标准**：用 curl 访问仓库的 raw.githubusercontent.com 确认 .js 文件存在且可下载。`,
+ `6. **按星数/更新时间排序**：优先返回星数多、近期更新的仓库。`,
+ `7. **精简高效**：找到 ${desiredCount} 个候选仓库即可停止，不要过度扫描。`,
+ `8. **最后只输出一个 JSON 结果块**：所有搜索日志放 agentLogs，最终仓库列表放 candidates。`,
  "",
  `## 搜索策略建议`,
- `- 用 Chromium 访问 Google 搜索 "free music API 2024 2025" 并按时间排序`,
- `- 用 Chromium 访问 GitHub 搜索 "NeteaseCloudMusicApi vercel" 按最近更新排序`,
- `- 用 Chromium 访问 GitHub 搜索 "meting api deploy" 按最新排序`,
- `- 用 Chromium 访问 Google 搜索 "免费音乐API开源 2025"`,
- `- 优先检查最近创建的 Vercel/Railway/Render 部署`,
- `- 用 curl 逐一验证找到的 API 端点是否可达、能搜索`,
- "",
- `## 测试歌曲`,
- `验证歌曲：周杰伦 - 搁浅（时长必须≥3分钟/180秒，无损文件越大越好）`,
+ `- 用 Chromium 访问 GitHub 搜索 "lx-music-source" 按星数排序`,
+ `- 用 Chromium 访问 GitHub 搜索 "lxmusic source" 按最近更新排序`,
+ `- 用 Chromium 访问 Google 搜索 "洛雪音乐 音源 github 2025"`,
+ `- 用 Chromium 访问 GitHub 搜索 "lx-music-sources" 按星数排序`,
+ `- 用 curl 访问仓库 API 验证目录结构和 .js 文件存在`,
  "",
  `## 目标数量`,
- `找到 ${desiredCount} 个候选 URL 即可（按发布时间从新到旧排列），应用会验证并保留最好的 ${Math.min(8, desiredCount)} 个。`,
+ `找到 ${desiredCount} 个候选仓库即可（按星数/更新时间排列）。`,
  "",
  excludedBlock.trim(),
  "",
  `## 返回格式（严格 JSON，整个输出中只能有这一个 JSON）`,
- `你的最终回复必须包含且仅包含以下 JSON 结构（可以先用文字记录搜索过程，但最后必须输出这个 JSON）：`,
+ `你的最终回复必须包含且仅包含以下 JSON 结构：`,
  "```json",
  `{`,
  ` "success": true,`,
- ` "message": "搜索完成，找到 N 个候选",`,
+ ` "message": "搜索完成，找到 N 个洛雪音源仓库",`,
  ` "manualActionRequired": false,`,
  ` "manualActionMessage": "",`,
  ` "dependencyStatus": [`,
@@ -706,40 +698,43 @@ export class HermesSourceApi {
  ` ],`,
  ` "agentLogs": [`,
  ` "步骤1: 正在检查 chromium...",`,
- ` "步骤2: 正在安装 chromium...",`,
- ` "步骤3: 用浏览器搜索 GitHub...",`,
- ` "步骤4: 找到候选 https://xxx.vercel.app",`,
- ` "步骤5: 用 curl 验证该 API 可达..."`,
+ ` "步骤2: 用浏览器搜索 GitHub lx-music-source...",`,
+ ` "步骤3: 找到仓库 Huibq/keep-alive (★6751)...",`,
+ ` "步骤4: 用 curl 验证仓库 .js 文件可达..."`,
  ` ],`,
  ` "candidates": [`,
  ` {`,
- ` "name": "NeteaseCloudMusicApi Vercel 实例",`,
- ` "searchUrl": "https://netease-cloud-music-api-xxx.vercel.app",`,
- ` "requestStyle": "server",`,
- ` "needsAuth": false,`,
- ` "confidence": 80,`,
- ` "reason": "从 GitHub 搜索发现，Vercel 部署，curl 测试搜索返回结果",`,
- ` "detectedFrom": "GitHub 搜索 NeteaseCloudMusicApi"`,
+ ` "name": "Huibq/keep-alive",`,
+ ` "owner": "Huibq",`,
+ ` "repo": "keep-alive",`,
+ ` "branch": "main",`,
+ ` "distPath": "",`,
+ ` "description": "洛雪音源保持活跃",`,
+ ` "confidence": 90,`,
+ ` "reason": "GitHub 星数6751，近期更新，含多个JS音源文件",`,
+ ` "detectedFrom": "GitHub 搜索 lx-music-source"`,
  ` },`,
  ` {`,
- ` "name": "Meting API Render 实例",`,
- ` "searchUrl": "https://meting-api-xxx.onrender.com",`,
- ` "requestStyle": "server",`,
- ` "needsAuth": false,`,
- ` "confidence": 70,`,
- ` "reason": "从 Google 搜索发现，Render 部署",`,
- ` "detectedFrom": "Google 搜索 free music API"`,
+ ` "name": "pdone/lx-music-source",`,
+ ` "owner": "pdone",`,
+ ` "repo": "lx-music-source",`,
+ ` "branch": "main",`,
+ ` "distPath": "",`,
+ ` "description": "洛雪音源合集",`,
+ ` "confidence": 85,`,
+ ` "reason": "GitHub 星数5976，包含多个音源JS",`,
+ ` "detectedFrom": "GitHub 搜索 lxmusic source"`,
  ` }`,
  ` ]`,
  `}`,
  "```",
  "",
  `### 字段说明`,
- `- **success**: true=搜索成功找到候选，false=搜索失败（如网络不通、chromium装不上）`,
+ `- **success**: true=搜索成功找到候选仓库，false=搜索失败`,
  `- **message**: 一句话总结搜索结果`,
- `- **confidence**: 0-100，你对这个 URL 可用性的把握程度`,
- `- **requestStyle 可选值**: "server" | "server-keyword" | "media" | "type-only" | "q" | "keyword"`,
- `- **searchUrl**: 必须是可直接发 HTTP 请求的 API 地址，不带查询参数`,
+ `- **confidence**: 0-100，你对这个仓库可用性的把握程度`,
+ `- **owner/repo/branch/distPath**: GitHub 仓库信息，系统将用这些信息加载 JS 插件`,
+ `- **distPath**: .js 文件所在子目录，根目录则填 ""`,
  "",
  `### 如果搜索失败`,
  `如果 Chromium 安装失败或网络不通，返回：`,
@@ -747,30 +742,48 @@ export class HermesSourceApi {
  `{ "success": false, "message": "chromium 安装失败: xxx", "candidates": [], "agentLogs": [...] }`,
  "```",
  "",
- `⚠️ 重要：JSON 必须是合法的、可被 JSON.parse() 直接解析的。不要有尾逗号、注释、或 markdown 代码块包裹（代码块标记可省略）。`,
- `如果找不到足够候选，返回你确认的所有真实可用 API，success 仍为 true。`,
+ `⚠️ 重要：JSON 必须是合法的、可被 JSON.parse() 直接解析的。不要有尾逗号、注释。`,
+ `如果找不到足够候选，返回你确认的所有真实可用仓库，success 仍为 true。`,
  ]
  .filter(Boolean)
  .join("\n");
  }
 
-  _normalizeCandidate(item) {
-    const searchUrl = this._normalizeBaseUrl(item?.searchUrl || item?.url || "");
-    if (!searchUrl || !/^https?:/i.test(searchUrl)) {
-      return null;
-    }
+ _normalizeCandidate(item) {
+ // 新格式：洛雪音源仓库（owner/repo/branch/distPath）
+ if (item?.owner && item?.repo) {
+ return {
+ name: String(item.name || `${item.owner}/${item.repo}`).trim(),
+ owner: String(item.owner).trim(),
+ repo: String(item.repo).trim(),
+ branch: String(item.branch || "main").trim(),
+ distPath: String(item.distPath || "").trim(),
+ description: String(item.description || "").trim(),
+ notes: String(item.reason || item.notes || "").trim(),
+ detectedFrom: String(item.detectedFrom || "").trim(),
+ confidence: Math.max(0, Math.min(100, toNumber(item?.confidence) || 0)),
+ _isLxRepo: true,
+ };
+ }
 
-    const requestStyle = this._normalizeRequestStyle(item?.requestStyle);
-    return {
-      name: String(item?.name || item?.title || "Unknown Source").trim(),
-      searchUrl,
-      requestStyle,
-      needsAuth: Boolean(item?.needsAuth),
-      notes: String(item?.reason || item?.notes || "").trim(),
-      detectedFrom: String(item?.detectedFrom || "").trim(),
-      confidence: Math.max(0, Math.min(100, toNumber(item?.confidence) || 0)),
-    };
-  }
+ // 兼容旧格式：API 端点 URL
+ const searchUrl = this._normalizeBaseUrl(item?.searchUrl || item?.url || "");
+ if (!searchUrl || !/^https?:/i.test(searchUrl)) {
+ return null;
+ }
+
+ const requestStyle = this._normalizeRequestStyle(item?.requestStyle);
+ return {
+ name: String(item?.name || item?.title || "Unknown Source").trim(),
+ searchUrl,
+ requestStyle,
+ needsAuth: Boolean(item?.needsAuth),
+ notes: String(item?.reason || item?.notes || "").trim(),
+ detectedFrom: String(item?.detectedFrom || "").trim(),
+ confidence: Math.max(0, Math.min(100, toNumber(item?.confidence) || 0)),
+ _isLxRepo: false,
+ };
+ }
 
   _normalizeRequestStyle(value) {
     return REQUEST_STYLES.includes(value) ? value : null;
@@ -781,8 +794,21 @@ export class HermesSourceApi {
  const apiResult = await this._runViaApiServer(task, agent, prompt);
  if (apiResult !== null) return apiResult;
 
- // Priority 2: CLI fallback (for OpenClaw or when API server unavailable)
- return this._runViaCli(task, agent, prompt);
+ // Priority 2: CLI fallback (shorter timeout)
+ try {
+ const cliResult = await this._runViaCli(task, agent, prompt, CLI_FALLBACK_TIMEOUT_MS);
+ if (cliResult) return cliResult;
+ } catch (cliError) {
+ console.log(`[AgentDiscovery] CLI 失败: ${cliError.message}, 尝试 GitHub API fallback`);
+ }
+
+ // Priority 3: GitHub API fallback (fast, no model dependency)
+ console.log(`[AgentDiscovery] ════════════════════════════════════════════`);
+ console.log(`[AgentDiscovery] 降级到 GitHub API 快速获取音源...`);
+ const githubResult = await this._runViaGitHubApi(task);
+ if (githubResult) return githubResult;
+
+ throw new Error("所有获取方式均失败：API Server、CLI、GitHub API");
  }
 
  async _runViaApiServer(task, agent, prompt) {
@@ -1031,7 +1057,7 @@ export class HermesSourceApi {
  });
  }
 
- async _runViaCli(task, agent, prompt) {
+ async _runViaCli(task, agent, prompt, customTimeoutMs) {
  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-agent-"));
  const promptFile = path.join(tmpDir, "prompt.txt");
  fs.writeFileSync(promptFile, prompt, "utf8");
@@ -1081,9 +1107,9 @@ export class HermesSourceApi {
     console.log(`[AgentDiscovery]     ${fullCmd}`);
     console.log(`[AgentDiscovery] ════════════════════════════════════════════`);
 
-    return new Promise((resolve, reject) => {
-      const child = spawn(command, args, options);
-      const timeoutMs = Math.min(this.maxTimeout, AGENT_COMMAND_TIMEOUT_MS);
+ return new Promise((resolve, reject) => {
+ const child = spawn(command, args, options);
+ const timeoutMs = customTimeoutMs || Math.min(this.maxTimeout, AGENT_COMMAND_TIMEOUT_MS);
       let stdout = "";
       let stderr = "";
       let settled = false;
@@ -1141,13 +1167,122 @@ export class HermesSourceApi {
         resolve(`${stdout}\n${stderr}`.trim());
       });
 
-      child.on("error", (err) => {
-        try { fs.unlinkSync(promptFile); } catch {}
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-        reject(err);
-      });
-    });
-  }
+ child.on("error", (err) => {
+ try { fs.unlinkSync(promptFile); } catch {}
+ try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+ reject(err);
+ });
+ });
+ }
+
+ /**
+ * GitHub API fallback: 直接从已知音源仓库获取音源
+ * 快速可靠，不依赖 AI 模型
+ */
+ async _runViaGitHubApi(task) {
+ const SOURCE_REPOS = [
+ { owner: "TZB679", repo: "USEFUL-LX-MUSIC-SOURCES" },
+ { owner: "pdone", repo: "lx-music-source", subdirs: ["flower", "grass", "huibq", "ikun", "juhe", "lx"] },
+ { owner: "Qian-Ning", repo: "LX-Music-Source" },
+ ];
+
+ const allCandidates = [];
+
+ for (const repo of SOURCE_REPOS) {
+ try {
+ if (repo.subdirs) {
+ // 有子目录的仓库，逐个子目录获取
+ for (const subdir of repo.subdirs) {
+ try {
+ const candidates = await this._fetchGitHubRepoSources(repo.owner, repo.repo, subdir);
+ allCandidates.push(...candidates);
+ if (allCandidates.length >= DISCOVERY_TARGET) break;
+ } catch (subErr) {
+ console.log(`[AgentDiscovery] GitHub ${repo.owner}/${repo.repo}/${subdir} 失败: ${subErr.message}`);
+ }
+ if (allCandidates.length >= DISCOVERY_TARGET) break;
+ }
+ } else {
+ const candidates = await this._fetchGitHubRepoSources(repo.owner, repo.repo);
+ allCandidates.push(...candidates);
+ }
+ if (allCandidates.length >= DISCOVERY_TARGET) break;
+ } catch (err) {
+ console.log(`[AgentDiscovery] GitHub ${repo.owner}/${repo.repo} 失败: ${err.message}`);
+ }
+ }
+
+ if (allCandidates.length === 0) return null;
+
+ // 格式化为 Agent 输出格式
+ const result = {
+ success: true,
+ message: `GitHub API fallback: 找到 ${allCandidates.length} 个候选音源`,
+ candidates: allCandidates,
+ manualActionRequired: false,
+ manualActionMessage: "",
+ dependencyStatus: [{ name: "github-api", status: "ok", details: "fallback模式" }],
+ agentLogs: [`GitHub API fallback: 获取 ${allCandidates.length} 个音源`],
+ };
+
+ return JSON.stringify(result);
+ }
+
+ _fetchGitHubRepoSources(owner, repo, subdir) {
+ const path = subdir ? `/${subdir}` : "";
+ const urlStr = `https://api.github.com/repos/${owner}/${repo}/contents${path}`;
+ const url = new URL(urlStr);
+ const httpModule = url.protocol === "https:" ? https : http;
+
+ return new Promise((resolve, reject) => {
+ const req = httpModule.get(urlStr, {
+ headers: { "User-Agent": "Web-Audio-Streamer/1.0" },
+ timeout: GITHUB_FALLBACK_TIMEOUT_MS,
+ }, (res) => {
+ let data = "";
+ res.on("data", (chunk) => { data += chunk.toString(); });
+ res.on("end", () => {
+ if (res.statusCode !== 200) {
+ reject(new Error(`HTTP ${res.statusCode}`));
+ return;
+ }
+ try {
+ const files = JSON.parse(data);
+ if (!Array.isArray(files)) {
+ reject(new Error("响应不是文件列表"));
+ return;
+ }
+
+ const jsFiles = files.filter((f) =>
+ f.name.endsWith(".js") && !f.name.toLowerCase().includes("readme")
+ );
+
+ const candidates = jsFiles.map((f) => ({
+ name: f.name.replace(/\.js$/, ""),
+ searchUrl: f.download_url,
+ requestStyle: "lx-plugin",
+ needsAuth: false,
+ confidence: 60,
+ reason: `从 GitHub ${owner}/${repo} 获取`,
+ detectedFrom: `GitHub API fallback: ${owner}/${repo}`,
+ _isLxPlugin: true,
+ }));
+
+ console.log(`[AgentDiscovery] GitHub ${owner}/${repo}: ${candidates.length} 个音源文件`);
+ resolve(candidates);
+ } catch (e) {
+ reject(e);
+ }
+ });
+ });
+
+ req.on("error", reject);
+ req.on("timeout", () => {
+ req.destroy();
+ reject(new Error("GitHub API 请求超时"));
+ });
+ });
+ }
 
  _extractAgentPayload(rawOutput) {
  // 策略1：直接找最后一个合法 JSON
@@ -1224,8 +1359,11 @@ export class HermesSourceApi {
  const agentLogs = Array.isArray(json.agentLogs) ? json.agentLogs : [];
  const dependencyStatus = Array.isArray(json.dependencyStatus) ? json.dependencyStatus : [];
 
- // 过滤非音源数据：candidates 里只保留有 searchUrl 的项
+ // 过滤非音源数据：保留仓库格式(owner/repo)和API格式(searchUrl)
  const validCandidates = candidates.filter((item) => {
+ // 仓库格式：有 owner 和 repo
+ if (item?.owner && item?.repo) return true;
+ // API格式：有 searchUrl/url
  const url = item?.searchUrl || item?.url || "";
  return url && /^https?:/i.test(url);
  });
@@ -1334,16 +1472,193 @@ export class HermesSourceApi {
     return results.sort((a, b) => b.aiScore - a.aiScore);
   }
 
-  async _validateSource(candidate) {
-    const styleCandidates = candidate.requestStyle ? [candidate.requestStyle] : REQUEST_STYLES;
+ async _validateSource(candidate) {
+ // LX Music 插件脚本：用轻量验证（下载 JS → 检查格式 + API_URL 可达）
+ if (candidate._isLxPlugin) {
+ return this._validateLxPlugin(candidate);
+ }
+
+ const styleCandidates = candidate.requestStyle ? [candidate.requestStyle] : REQUEST_STYLES;
 
     for (const requestStyle of styleCandidates) {
       const validation = await this._validateSourceWithStyle(candidate, requestStyle);
       if (validation) return validation;
     }
 
-    return null;
-  }
+ return null;
+ }
+
+ /**
+ * 轻量验证 LX Music 插件脚本
+ * 下载 JS → 检查格式（有 send(EVENT_NAMES)）→ 提取 API_URL → HEAD 检测可达
+ */
+ async _validateLxPlugin(candidate) {
+ try {
+ // 快速下载 JS 文件（5秒超时）
+ const body = await this._fetchTextWithTimeout(candidate.searchUrl, 8000);
+ if (!body || body.length < 100) return null;
+
+ // 检查 LX Music 插件格式
+ if (!body.includes("EVENT_NAMES") && !body.includes("lx")) return null;
+
+ // 提取 API_URL
+ const apiUrlMatch = body.match(/API_URL\s*=\s*['"]([^'"]+)['"]/);
+ const apiUrl = apiUrlMatch ? apiUrlMatch[1] : null;
+
+ // 提取版本
+ const versionMatch = body.match(/@version\s+(v?[\d.]+)/);
+ const version = versionMatch ? versionMatch[1] : "";
+
+ // 提取描述
+ const descMatch = body.match(/@description\s+(.+)/);
+ const description = descMatch ? descMatch[1].trim() : candidate.name;
+
+ // API_URL 可达性检测（仅 HEAD，不下载内容）
+ let apiReachable = false;
+ if (apiUrl) {
+ try {
+ apiReachable = await this._headCheck(apiUrl);
+ } catch {
+ apiReachable = false;
+ }
+ }
+
+ // 提取支持的音源平台
+ const sourceMatch = body.match(/MUSIC_SOURCE\s*=\s*(?:Object\.keys\()?(\[[\s\S]*?\])(?:\))?/);
+ let supportedSources = [];
+ if (sourceMatch) {
+ try {
+ supportedSources = JSON.parse(sourceMatch[1].replace(/'/g, '"'));
+ } catch {}
+ }
+
+ return {
+ name: candidate.name,
+ searchUrl: candidate.searchUrl,
+ requestStyle: "lx-plugin",
+ needsAuth: false,
+ repo: candidate.detectedFrom || "GitHub",
+ description: `${description}${version ? ` ${version}` : ""}${apiUrl ? ` | API: ${apiUrl}` : ""}`,
+ aiScore: this._scoreLxPlugin({ apiReachable, contentLength: body.length, hasApiUrl: !!apiUrl, supportedSources }),
+ verifiedAt: new Date().toISOString(),
+ sampleSong: "",
+ sampleArtist: "",
+ sampleDurationSec: 0,
+ samplePlayUrl: "",
+ sampleFileSizeBytes: 0,
+ queryCount: 0,
+ detectedFrom: candidate.detectedFrom || "",
+ _isLxPlugin: true,
+ _apiUrl: apiUrl || "",
+ _apiReachable: apiReachable,
+ _supportedSources: supportedSources,
+ _version: version,
+ };
+ } catch {
+ return null;
+ }
+ }
+
+ _scoreLxPlugin({ apiReachable, contentLength, hasApiUrl, supportedSources }) {
+ let score = 40; // 基础分
+ if (apiReachable) score += 30;
+ if (hasApiUrl) score += 10;
+ if (supportedSources.length >= 3) score += 10;
+ if (contentLength > 5000) score += 5; // 更大的文件可能功能更完整
+ if (contentLength > 15000) score += 5;
+ return Math.max(1, Math.min(100, score));
+ }
+
+ async _fetchText(url) {
+ // GitHub raw URL 可能含有中文/空格/括号，需要编码路径
+ const safeUrl = this._encodeUrl(url);
+ const response = await this._request(safeUrl, 5, false);
+ return response?.body || "";
+ }
+
+ async _fetchTextWithTimeout(url, timeoutMs = 8000) {
+ const safeUrl = this._encodeUrl(url);
+ return new Promise((resolve) => {
+ const parsed = new URL(safeUrl);
+ const transport = parsed.protocol === "https:" ? https : http;
+ const req = transport.get(safeUrl, {
+ headers: { "User-Agent": "Mozilla/5.0 (Web-Audio-Streamer)" },
+ timeout: timeoutMs,
+ }, (res) => {
+ let body = "";
+ res.on("data", (chunk) => { body += chunk.toString(); });
+ res.on("end", () => resolve(body));
+ });
+ req.on("error", () => resolve(""));
+ req.on("timeout", () => { req.destroy(); resolve(""); });
+ });
+ }
+
+ _encodeUrl(url) {
+ try {
+ // GitHub raw URL 需要括号等特殊字符编码
+ // encodeURIComponent 不编码 ()[] ，但 GitHub raw 需要
+ let rawUrl = url;
+ if (/[() [\]{}]/.test(rawUrl) || /[\u4e00-\u9fff]/.test(rawUrl)) {
+ try {
+ const urlObj = new URL(rawUrl);
+ const safePath = urlObj.pathname
+ .split("/")
+ .map((seg) => {
+ if (!seg) return seg;
+ try {
+ const decoded = decodeURIComponent(seg);
+ let encoded = encodeURIComponent(decoded);
+ // 手动编码 encodeURIComponent 不处理的字符
+ encoded = encoded
+ .replace(/\(/g, "%28")
+ .replace(/\)/g, "%29")
+ .replace(/!/g, "%21")
+ .replace(/\[/g, "%5B")
+ .replace(/\]/g, "%5D");
+ return encoded;
+ } catch {
+ // decodeURIComponent 失败，直接编码
+ let encoded = encodeURIComponent(seg);
+ encoded = encoded
+ .replace(/\(/g, "%28")
+ .replace(/\)/g, "%29")
+ .replace(/!/g, "%21")
+ .replace(/\[/g, "%5B")
+ .replace(/\]/g, "%5D");
+ return encoded;
+ }
+ })
+ .join("/");
+ return `${urlObj.protocol}//${urlObj.host}${safePath}${urlObj.search}`;
+ } catch {
+ // new URL() 失败，手动编码
+ }
+ }
+ return rawUrl
+ .replace(/ /g, "%20")
+ .replace(/\(/g, "%28")
+ .replace(/\)/g, "%29")
+ .replace(/\[/g, "%5B")
+ .replace(/\]/g, "%5D");
+ } catch {
+ return url;
+ }
+ }
+
+ async _headCheck(url) {
+ const safeUrl = this._encodeUrl(url);
+ return new Promise((resolve) => {
+ const parsed = new URL(safeUrl);
+ const mod = parsed.protocol === "https:" ? https : http;
+ const req = mod.request(safeUrl, { method: "HEAD", timeout: 5000 }, (res) => {
+ resolve(res.statusCode >= 200 && res.statusCode < 400);
+ });
+ req.on("error", () => resolve(false));
+ req.on("timeout", () => { req.destroy(); resolve(false); });
+ req.end();
+ });
+ }
 
  async _validateSourceWithStyle(candidate, requestStyle) {
  const queryResults = [];

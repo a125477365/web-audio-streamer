@@ -1,217 +1,84 @@
+/**
+ * 在线音乐 API — 重构后架构
+ * 
+ * 职责分离（与洛雪音乐完全一致）：
+ * - 搜索：委托给 MusicSearchSdk（内置网易云/酷我/酷狗搜索实现）
+ * - 播放链接：委托给 LxPluginRuntime（通过JS音源脚本获取）
+ * - 本模块只做协调和格式转换
+ * 
+ * 流程：
+ * 1. 用户搜索 → search() → MusicSearchSdk.searchMulti() → 返回标准化歌曲列表
+ * 2. 用户播放 → getSongUrl() → LxPluginRuntime.getMusicUrl() → 返回mp3链接
+ * 3. 前端拿到mp3链接 → 传给 AudioStreamer 播放
+ */
+
 import https from "https";
 import http from "http";
-import crypto from "crypto";
-
-const QUALITY_RANK = {
-  hires: 100,
-  flac: 90,
-  ape: 85,
-  wav: 80,
-  sq: 70,
-  320: 70,
-  "320kbps": 70,
-  hq: 50,
-  192: 50,
-  standard: 30,
-  128: 30,
-  low: 10,
-};
-
-const NXVAV_TOKEN = "nxvav";
-
-// Always use Netease Direct for search - it's free and always available
-const NETEASE_SEARCH_URL = "https://music.163.com/api/search/get/";
+import { MusicSearchSdk } from "./music-search-sdk.js";
 
 export class OnlineMusicApi {
-  constructor(config) {
+  /**
+   * @param {object} config - 配置
+   * @param {import('./lx-plugin-runtime.js').LxPluginRuntime} lxRuntime - LX 插件运行时
+   */
+  constructor(config, lxRuntime = null) {
     this.config = config;
-    this.provider = config.online?.provider || "netease";
+    this.lxRuntime = lxRuntime;
+    this.searchSdk = new MusicSearchSdk();
+
+    // 向后兼容
     this.source = null;
+    this.provider = config.online?.provider || "wy";
   }
 
+  /** 设置 LX Plugin Runtime 实例 */
+  setLxRuntime(runtime) {
+    this.lxRuntime = runtime;
+  }
+
+  /** 兼容旧接口 */
   setSource(source) {
     this.source = source && source.searchUrl ? { ...source } : null;
   }
 
-  _requireSource() {
-    if (!this.source?.searchUrl) {
-      throw new Error("No music source selected");
-    }
-    return this.source;
-  }
+  // ==========================================================
+  // 搜索 — 委托给 MusicSearchSdk
+  // ==========================================================
 
-  _getBaseUrl() {
-    return this._requireSource().searchUrl;
-  }
-
-  _getRequestStyle() {
-    return this.source?.requestStyle || "server";
-  }
-
-  _buildApiUrl(action, value, auth) {
-    const base = this._getBaseUrl();
-    const style = this._getRequestStyle();
-
-    const keywordParams = ["keywords", "keyword", "msg", "q", "name", "search_query", "wd", "w"];
-    const idParams = ["id", "mid", "songid", "track_id"];
-
-    const applyValue = (urlObj, paramNames, replacementValue) => {
-      for (const p of paramNames) {
-        if (urlObj.searchParams.has(p)) {
-          urlObj.searchParams.set(p, replacementValue);
-          return;
-        }
-      }
-      urlObj.searchParams.append(paramNames[0], replacementValue);
-    };
-
-    let urlObj;
+  /**
+   * 搜索音乐
+   * 
+   * @param {string} query - 搜索关键词
+   * @param {object} options - { limit, page, source }
+   *   source: 'wy'|'kw'|'kg' — 单平台搜索
+   *   不传 source — 多平台并行搜索
+   * @returns {Promise<Array>} 标准化歌曲列表（前端显示格式）
+   */
+  async search(query, options = {}) {
     try {
-      urlObj = new URL(base);
-    } catch {
-      return null;
-    }
+      let lxResults;
 
-    // Meting.js with type=name (for song name search)
-    if (style === "meting-name" || style === "meting-play") {
-      if (action === "search") {
-        // Use type=name for searching by song name
-        applyValue(urlObj, keywordParams, value);
-        if (!urlObj.searchParams.has("server")) {
-          urlObj.searchParams.set("server", this.provider);
-        }
-        if (!urlObj.searchParams.has("type")) {
-          urlObj.searchParams.set("type", "name");
-        }
-        return urlObj.toString();
+      if (options.source) {
+        // 单平台搜索
+        const result = await this.searchSdk.search(query, options);
+        lxResults = result.list || [];
       } else {
-        // Use type=url for getting play URL
-        applyValue(urlObj, idParams, value);
-        if (!urlObj.searchParams.has("server")) {
-          urlObj.searchParams.set("server", this.provider);
-        }
-        if (!urlObj.searchParams.has("type")) {
-          urlObj.searchParams.set("type", action);
-        }
-        if (auth) urlObj.searchParams.set("auth", auth);
-        return urlObj.toString();
-      }
-    }
-
-    if (style === "server-keyword" || style === "server") {
-      if (action === "search") {
-        applyValue(urlObj, keywordParams, value);
-      } else {
-        applyValue(urlObj, keywordParams, value);
-        applyValue(urlObj, idParams, value);
-      }
-      if (!urlObj.searchParams.has("server")) {
-        urlObj.searchParams.set("server", this.provider);
-      }
-      if (action !== "search" && !urlObj.searchParams.has("type")) {
-        urlObj.searchParams.set("type", action);
-      }
-      if (auth) urlObj.searchParams.set("auth", auth);
-      return urlObj.toString();
-    }
-
-    if (style === "media") {
-      if (action !== "search") {
-        applyValue(urlObj, idParams, value);
-      } else {
-        applyValue(urlObj, keywordParams, value);
-      }
-      if (!urlObj.searchParams.has("media")) urlObj.searchParams.set("media", this.provider);
-      if (!urlObj.searchParams.has("type")) urlObj.searchParams.set("type", action);
-      return urlObj.toString();
-    }
-
-    if (style === "type-only") {
-      if (action !== "search") {
-        applyValue(urlObj, idParams, value);
-      } else {
-        applyValue(urlObj, keywordParams, value);
-      }
-      if (!urlObj.searchParams.has("type")) urlObj.searchParams.set("type", action);
-      return urlObj.toString();
-    }
-
-    if (style === "q" || style === "keyword") {
-      if (action !== "search") {
-        return null;
-      }
-      applyValue(urlObj, keywordParams, value);
-      return urlObj.toString();
-    }
-
-    return null;
-  }
-
-  _generateAuth(id, type = "url") {
-    const message = `${this.provider}${type}${id}`;
-    return crypto.createHmac("sha1", NXVAV_TOKEN).update(message).digest("hex");
-  }
-
-  async search(query) {
-    try {
-      // Always use Netease Direct for search - it's free and always works
-      const searchUrl = `${NETEASE_SEARCH_URL}?s=${encodeURIComponent(query)}&type=1&limit=30`;
-      const data = await this._fetchJson(searchUrl);
-
-      const rawResults = Array.isArray(data)
-        ? data
-        : (data?.result?.songs || []);
-      if (!Array.isArray(rawResults)) {
-        return {
-          success: false,
-          error: "Search returned an unexpected payload",
-        };
+        // 多平台并行搜索（默认）
+        lxResults = await this.searchSdk.searchMulti(query, options);
       }
 
-      // If we have a configured source for play URL resolution, validate the first few results
-      const hasPlayUrlSource = this.source?.searchUrl;
+      // 转换为前端显示格式
+      const displayResults = MusicSearchSdk.toDisplayFormat(lxResults);
 
-      const songs = await Promise.all(
-        rawResults.map(async (item, index) => {
-          const songId = item.id || `unknown_${index}`;
-          const artistName = Array.isArray(item.artists)
-            ? item.artists.map((a) => a.name || a).join(", ")
-            : (item.artist || item.author || item.singer || "Unknown");
-          const albumName = item.album?.name || item.al || "";
-          const coverUrl = item.album?.picUrl || item.picUrl || "";
-          const duration = item.duration ? item.duration / 1000 : null;
-
-          let playUrl = "";
-          if (hasPlayUrlSource) {
-            try {
-              playUrl = await this._resolvePlayUrlFromSource(songId, item.name || query);
-            } catch {}
-          }
-
-          return {
-            id: String(songId),
-            title: item.name || "Unknown",
-            artist: artistName,
-            album: albumName,
-            cover: coverUrl,
-            playUrl,
-            duration: duration,
-            durationMs: item.duration || null,
-            size: item.size || null,
-            sizeText: item.size
-              ? `${Math.round((item.size / 1024 / 1024) * 10) / 10}MB`
-              : null,
-            qualityScore: item.qualityScore || 50,
-          };
-        })
-      );
-
-      // Filter out very short previews (< 90s)
-      return songs.filter((song) => {
+      // 过滤掉过短的试听（< 90秒）
+      const filtered = displayResults.filter((song) => {
         if (!song.duration) return true;
-        return !(song.duration > 0 && song.duration < 90);
+        return song.duration >= 90;
       });
+
+      return filtered;
     } catch (error) {
+      console.error("[OnlineMusicApi] 搜索失败:", error.message);
       return {
         success: false,
         error: error.message,
@@ -219,73 +86,114 @@ export class OnlineMusicApi {
     }
   }
 
+  // ==========================================================
+  // 播放链接获取 — 委托给 LxPluginRuntime
+  // ==========================================================
+
   /**
-   * Resolve a playable URL using the configured source (e.g., Injahow Meting API)
+   * 获取歌曲播放链接
+   * 
+   * 优先使用 LX Runtime（多插件并发），回退到直连
+   * 
+   * @param {string} id - 歌曲ID (songmid)
+   * @param {object} songInfo - 歌曲完整信息
+   * @param {string} quality - 音质 (128k/320k/flac)
+   * @returns {Promise<string>} mp3 播放链接
    */
-  async _resolvePlayUrlFromSource(songId, songTitle) {
-    if (!this.source?.searchUrl) return "";
+  async getSongUrl(id, songInfo = {}, quality = "320k") {
+    // 优先：LX Runtime 多源并发
+    if (this.lxRuntime && this.lxRuntime.plugins.length > 0) {
+      const info = {
+        id: String(id),
+        songmid: String(id),
+        source: songInfo.source || "wy",
+        title: songInfo.title || "",
+        hash: songInfo.hash || "",
+        albumId: songInfo.albumId || "",
+        strMediaMid: songInfo.strMediaMid || "",
+        ...songInfo,
+      };
 
-    const baseUrl = this.source.searchUrl;
-    const style = this.source.requestStyle || "server";
-    const auth = this._generateAuth(String(songId), "url");
-
-    // Try multiple URL formats
-    const urls = [
-      `${baseUrl}?server=netease&type=url&id=${songId}&auth=${auth}`,
-      `${baseUrl}?server=netease&type=url&id=${songId}`,
-      `${baseUrl}?media=netease&type=url&id=${songId}`,
-      `${baseUrl}?type=url&id=${songId}`,
-    ];
-
-    for (const url of urls) {
       try {
-        const redirectUrl = await this._getRedirectUrl(url);
-        if (redirectUrl) return redirectUrl;
+        const url = await this.lxRuntime.getMusicUrl(info, quality);
+        console.log(`[OnlineMusicApi] ✅ LX Runtime 获取播放链接成功: ${info.source}/${id}`);
+        return url;
+      } catch (err) {
+        console.warn(`[OnlineMusicApi] LX Runtime 失败: ${err.message}，尝试直连回退...`);
+      }
+    }
+
+    // 回退1：网易云直连
+    if (songInfo.source === "wy" || (!songInfo.source && this.provider === "wy")) {
+      try {
+        const url = await this._neteaseDirectUrl(id);
+        if (url) return url;
       } catch {}
     }
 
+    // 回退2：忆音源代理
+    try {
+      const url = await this._fallbackProxy(id, songInfo.source);
+      if (url) return url;
+    } catch {}
+
+    throw new Error(`无法获取播放链接: ${songInfo.title || id} (${songInfo.source || "wy"})`);
+  }
+
+  // ==========================================================
+  // 歌词获取
+  // ==========================================================
+
+  async getLyric(id, source = "wy") {
+    if (source === "wy") {
+      try {
+        const url = `https://music.163.com/api/song/lyric?id=${id}&lv=1`;
+        const data = await this._fetchJson(url);
+        if (data?.lrc?.lyric) return data.lrc.lyric;
+      } catch {}
+    }
     return "";
   }
 
-  async getSongDetail(id) {
-    try {
-      this._requireSource();
-      const url = this._buildApiUrl("song", id);
-      if (!url) {
-        return null;
-      }
+  // ==========================================================
+  // 内部回退方法
+  // ==========================================================
 
-      const data = await this._fetchWithRedirect(url);
-      const item = data?.data || data?.song || data?.songs?.[0] || data;
-      if (item && (item.title || item.name)) {
-        return {
-          id,
-          title: item.name || item.title,
-          artist: Array.isArray(item.artists) ? item.artists.map(a => a.name || a).join(", ") : (item.artist || item.author || "Unknown"),
-          album: item.album?.name || item.al || "",
-          cover: item.album?.picUrl || item.picUrl || item.pic || "",
-          url: item.url || item.playUrl || "",
-        };
-      }
-    } catch {}
-
+  /**
+   * 网易云直连获取播放链接
+   */
+  async _neteaseDirectUrl(songId) {
+    const url = `https://music.163.com/api/song/enhance/player/url?id=${songId}&ids=[${songId}]&br=320000`;
+    const data = await this._fetchJson(url);
+    if (data?.data?.[0]?.url) {
+      return data.data[0].url;
+    }
     return null;
   }
 
-  async getSongUrl(id) {
-    try {
-      this._requireSource();
-      const auth = this.source?.needsAuth ? this._generateAuth(id, "url") : null;
-      const url = this._buildApiUrl("url", id, auth);
-      if (!url) {
-        throw new Error("Selected source does not support playback URL lookup");
-      }
+  /**
+   * 代理回退（忆音源等第三方代理）
+   */
+  async _fallbackProxy(songId, source = "netease") {
+    const sourceMap = { wy: "netease", kw: "kuwo", kg: "kugou" };
+    const server = sourceMap[source] || "netease";
 
-      return await this._getRedirectUrl(url);
-    } catch (error) {
-      throw new Error(`Unable to get song URL: ${error.message}`);
+    const proxyUrls = [
+      `https://music.3e0.cn/?server=${server}&type=url&id=${songId}`,
+    ];
+
+    for (const url of proxyUrls) {
+      try {
+        const result = await this._getRedirectUrl(url);
+        if (result) return result;
+      } catch {}
     }
+    return null;
   }
+
+  // ==========================================================
+  // HTTP 工具方法
+  // ==========================================================
 
   _getRedirectUrl(url, maxRedirects = 5) {
     return new Promise((resolve, reject) => {
@@ -313,7 +221,18 @@ export class OnlineMusicApi {
         }
 
         if (res.statusCode === 200) {
-          resolve(url);
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => {
+            try {
+              const json = JSON.parse(body);
+              if (json?.url) {
+                resolve(json.url);
+                return;
+              }
+            } catch {}
+            resolve(url);
+          });
           return;
         }
 
@@ -328,7 +247,7 @@ export class OnlineMusicApi {
     });
   }
 
-  _fetchJson(url) {
+  _fetchJson(url, extraHeaders = {}) {
     return new Promise((resolve, reject) => {
       const parsedUrl = new URL(url);
       const lib = parsedUrl.protocol === "https:" ? https : http;
@@ -337,6 +256,7 @@ export class OnlineMusicApi {
         headers: {
           Accept: "application/json",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          ...extraHeaders,
         },
         timeout: 15000,
       }, (res) => {
@@ -352,61 +272,6 @@ export class OnlineMusicApi {
       }).on("error", reject);
     });
   }
-
-  async getLyric(id) {
-    try {
-      this._requireSource();
-      const auth = this.source?.needsAuth ? this._generateAuth(id, "lrc") : null;
-      const url = this._buildApiUrl("lrc", id, auth);
-      if (!url) {
-        return "";
-      }
-      return await this._fetchWithRedirect(url);
-    } catch {
-      return "";
-    }
-  }
-
-  _fetchWithRedirect(url, maxRedirects = 5) {
-    return new Promise((resolve, reject) => {
-      if (maxRedirects <= 0) {
-        reject(new Error("Too many redirects"));
-        return;
-      }
-
-      const parsedUrl = new URL(url);
-      const lib = parsedUrl.protocol === "https:" ? https : http;
-      const options = {
-        headers: {
-          Accept: "*/*",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        },
-        timeout: 15000,
-      };
-
-      lib
-        .get(url, options, (res) => {
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            const nextUrl = res.headers.location.startsWith("http")
-              ? res.headers.location
-              : new URL(res.headers.location, parsedUrl.origin).href;
-            resolve(this._fetchWithRedirect(nextUrl, maxRedirects - 1));
-            return;
-          }
-
-          let data = "";
-          res.on("data", (chunk) => {
-            data += chunk;
-          });
-          res.on("end", () => {
-            try {
-              resolve(JSON.parse(data));
-            } catch {
-              resolve(data);
-            }
-          });
-        })
-        .on("error", reject);
-    });
-  }
 }
+
+export default OnlineMusicApi;
