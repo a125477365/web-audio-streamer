@@ -548,12 +548,12 @@ export class LxPluginRuntime {
         const existSources = Object.keys(p.supportedSources).sort().join(",");
         return p.name === sandbox.name && existSources === newSources;
       });
-      if (dup) {
-        console.log(
-          `[LxRuntime] ⏭️ 跳过重复: ${sandbox.name} (已从 ${dup.scriptUrl} 加载)`
-        );
-        return dup; // 返回已有的，不重复添加
-      }
+  if (dup) {
+  console.log(
+  `[LxRuntime] ⏭️ 跳过重复: ${sandbox.name} (已从 ${dup.scriptUrl} 加载)`
+  );
+  return null; // 去重跳过，不计入成功数
+  }
 
       this.plugins.push(sandbox);
       console.log(
