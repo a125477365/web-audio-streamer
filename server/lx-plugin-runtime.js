@@ -358,9 +358,12 @@ class LxPluginSandbox {
         },
       };
 
-      const context = vm.createContext(injectedGlobals);
+  const context = vm.createContext(injectedGlobals, {
+  codeGeneration: { strings: false, wasm: false }, // 禁止 eval/Function，减少内存
+  name: this.scriptUrl || 'lx-plugin',
+  });
 
-      const wrappedCode = `
+  const wrappedCode = `
 (() => {
 try {
 ${this.scriptCode}
@@ -369,10 +372,10 @@ globalThis.__lx_init_error_handler__.sendError(err.message);
 }
 })()
 `;
-      const wrappedScript = new vm.Script(wrappedCode, {
-        filename: this.scriptUrl || 'lx-plugin.js',
-      });
-      wrappedScript.runInContext(context);
+  const wrappedScript = new vm.Script(wrappedCode, {
+  filename: this.scriptUrl || 'lx-plugin.js',
+  });
+  wrappedScript.runInContext(context, { timeout: 5000 }); // 5秒执行超时
 
       await Promise.race([
         initPromise,
@@ -391,17 +394,21 @@ globalThis.__lx_init_error_handler__.sendError(err.message);
         this._extractSourcesFromCode();
       }
 
-      if (!this.requestHandler) {
-        this.initError = "插件未注册 request 事件处理器";
-        this.initialized = false;
-      }
+  if (!this.requestHandler) {
+  this.initError = "插件未注册 request 事件处理器";
+  this.initialized = false;
+  // 销毁 context 帮助 GC 回收内存
+  try { context && (context.__lx_cleanup__ = null); } catch {}
+  }
 
-      return this.initialized;
-    } catch (err) {
-      this.initError = err.message;
-      this.initialized = false;
-      return false;
-    }
+  return this.initialized;
+  } catch (err) {
+  this.initError = err.message;
+  this.initialized = false;
+  // 销毁 context 帮助 GC 回收内存
+  try { context && (context.__lx_cleanup__ = null); } catch {}
+  return false;
+  }
   }
 
   /**
@@ -525,10 +532,29 @@ export class LxPluginRuntime {
    * 加载并初始化一个插件
    */
   async loadPlugin(scriptUrl, scriptCode) {
+    // 快速检测：跳过明显的混淆/加密脚本（特征：function(p,O) + 十六进制编码）
+    if (this._isObfuscated(scriptCode)) {
+      console.log(`[LxRuntime] ⏭️ 跳过混淆脚本: ${scriptUrl}`);
+      return null;
+    }
+
     const sandbox = new LxPluginSandbox(scriptUrl, scriptCode);
     const ok = await sandbox.init();
 
     if (ok && sandbox.requestHandler) {
+      // 去重：同名插件且支持平台完全相同 → 跳过
+      const newSources = Object.keys(sandbox.supportedSources).sort().join(",");
+      const dup = this.plugins.find(p => {
+        const existSources = Object.keys(p.supportedSources).sort().join(",");
+        return p.name === sandbox.name && existSources === newSources;
+      });
+      if (dup) {
+        console.log(
+          `[LxRuntime] ⏭️ 跳过重复: ${sandbox.name} (已从 ${dup.scriptUrl} 加载)`
+        );
+        return dup; // 返回已有的，不重复添加
+      }
+
       this.plugins.push(sandbox);
       console.log(
         `[LxRuntime] ✅ 加载成功: ${sandbox.name} ` +
@@ -839,8 +865,25 @@ export class LxPluginRuntime {
           try { resolve(JSON.parse(data)); }
           catch { reject(new Error(`Invalid JSON from ${url}`)); }
         });
-      }).on("error", reject);
-    });
+  }).on("error", reject);
+  });
+  }
+
+  /**
+  * 检测是否为混淆/加密脚本
+  * 特征：function(p,O) 结构 + 大量 \x30\x78 十六进制编码
+  */
+  _isObfuscated(code) {
+    if (!code || code.length < 100) return false;
+    // pdone 仓库的混淆脚本特征：开头就是 (function(p,O){ ... }(R,
+    if (/\(function\s*\(\s*p\s*,\s*O\s*\)/.test(code)) return true;
+    // 大量十六进制转义（混淆代码的核心特征）
+    const hexCount = (code.match(/\\x[0-9a-fA-F]{2}/g) || []).length;
+    if (hexCount > 50) return true;
+    // 无注释头（洛雪插件都有 /*! @name */ 注释头）
+    const hasHeader = /\/[!*]\s*@name/i.test(code.substring(0, 500));
+    if (!hasHeader && /\b0x[0-9a-fA-F]{2,}\b/.test(code.substring(0, 200))) return true;
+    return false;
   }
 }
 

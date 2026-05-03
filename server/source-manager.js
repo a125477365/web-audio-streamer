@@ -385,7 +385,7 @@ export class SourceManager {
  log(`搜索到 ${allRepos.length} 个仓库: ${allRepos.slice(0, 5).map(r => `${r.owner}/${r.repo}(★${r.stars})`).join(", ")}`);
  }
 
- return allRepos.slice(0, 10);
+ return allRepos.slice(0, 5); // 只取 top 5 仓库，避免 OOM
  }
 
  /**
@@ -430,22 +430,22 @@ export class SourceManager {
       const apiUrl = `https://api.github.com/repos/${owner}/${repoName}/contents`;
       jsFiles = await this._listJsFiles(apiUrl);
 
-      // 也扫描子目录
-      const subdirs = jsFiles.filter((f) => f.type === "dir" && !f.name.startsWith("."));
-      for (const dir of subdirs.slice(0, 5)) {
-        try {
-          const subUrl = `https://api.github.com/repos/${owner}/${repoName}/contents/${dir.name}?ref=${branch}`;
-          const subFiles = await this._listJsFiles(subUrl);
-          jsFiles.push(...subFiles.filter((f) => f.type === "file"));
-        } catch {}
-      }
+ // 也扫描子目录
+  const subdirs = jsFiles.filter((f) => f.type === "dir" && !f.name.startsWith("."));
+  for (const dir of subdirs.slice(0, 3)) { // 只扫3个子目录
+  try {
+  const subUrl = `https://api.github.com/repos/${owner}/${repoName}/contents/${dir.name}?ref=${branch}`;
+  const subFiles = await this._listJsFiles(subUrl);
+  jsFiles.push(...subFiles.filter((f) => f.type === "file"));
+  } catch {}
+  }
 
-      // 过滤只保留 .js 文件
-      jsFiles = jsFiles.filter((f) => f.name?.endsWith(".js") && f.type === "file");
-    }
+  // 过滤只保留 .js 文件
+  jsFiles = jsFiles.filter((f) => f.name?.endsWith(".js") && f.type === "file");
+  }
 
-    // 限制数量，避免太多
-    jsFiles = jsFiles.slice(0, 15);
+  // 限制数量，避免太多
+  jsFiles = jsFiles.slice(0, 8); // 每仓库最多8个JS文件
 
     const loaded = [];
     const failed = [];
@@ -467,15 +467,29 @@ export class SourceManager {
           }
         }
 
-        if (!code) {
-          code = await this.lxRuntime._downloadScript(downloadUrl);
-          if (!code) {
-            failed.push({ file: file.name, error: "下载失败" });
-            continue;
-          }
-          // 写入缓存
-          fs.writeFileSync(cachePath, code, "utf-8");
-        }
+  if (!code) {
+  code = await this.lxRuntime._downloadScript(downloadUrl);
+  if (!code) {
+  failed.push({ file: file.name, error: "下载失败" });
+  continue;
+  }
+  // 写入缓存
+  fs.writeFileSync(cachePath, code, "utf-8");
+  }
+
+  // 预检查：必须是洛雪插件格式（含 @name/@description 注释），否则跳过
+  // 支持格式: // @name, /* @name, /*! * @name, 以及多行注释中的 @name
+  const header = code.substring(0, 1000);
+  if (!/@name\s+/i.test(header) || !/@description\s+/i.test(header)) {
+  console.log(`[SourceManager] ⏭️ 跳过非洛雪格式: ${file.name}`);
+  continue;
+  }
+
+  // 预检查：跳过混淆脚本
+  if (this.lxRuntime._isObfuscated(code)) {
+  console.log(`[SourceManager] ⏭️ 跳过混淆脚本: ${file.name}`);
+  continue;
+  }
 
         const plugin = await this.lxRuntime.loadPlugin(downloadUrl, code);
         if (plugin) {

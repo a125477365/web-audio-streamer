@@ -1265,14 +1265,17 @@ process.on("uncaughtException", (err) => {
 
 // Only catch unhandled rejections that are actual errors, not benign ones
 let unhandledRejectionCount = 0;
-const MAX_UNHANDLED_REJECTIONS = 10;
+const MAX_UNHANDLED_REJECTIONS = 50;
+const BENIGN_PATTERNS = ["服务器异常", "block ip", "get music url failed", "too many requests"];
 process.on("unhandledRejection", (reason, promise) => {
-  unhandledRejectionCount++;
+  const reasonStr = reason instanceof Error ? reason.message : String(reason);
 
-  // Log details for debugging
-  const reasonStr = reason instanceof Error
-    ? `${reason.message}\n${reason.stack}`
-    : String(reason);
+  // 跳过已知的无害错误（混淆脚本/远程API报错）
+  if (BENIGN_PATTERNS.some(p => reasonStr.includes(p))) {
+    return; // 不计数，不退出
+  }
+
+  unhandledRejectionCount++;
   console.error(`[Server] Unhandled Rejection #${unhandledRejectionCount}:`, reasonStr);
 
   // Only exit if we hit too many unhandled rejections (suggests a systemic issue)
