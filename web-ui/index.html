@@ -714,14 +714,22 @@ function doSearch() {
  if (s.source) params += '&source=' + encodeURIComponent(s.source);
  if (s.hash) params += '&hash=' + encodeURIComponent(s.hash);
  apiGet('/online/url?' + params).then(function(res) {
-   if (res.success && res.url) {
-     apiGet('/online/play?url=' + encodeURIComponent(res.url)).then(function(res2) {
-       if (res2.success) track.value = { title: s.title, artist: s.artist, id: s.id, source: s.source };
-     });
-   } else {
-     fetchError.value = '获取播放链接失败: ' + (res.error || '未知错误');
-     showFetchError.value = true;
-   }
+ if (res.success && res.url) {
+ apiGet('/online/play?url=' + encodeURIComponent(res.url)).then(function(res2) {
+ if (res2.success) {
+ track.value = { title: s.title, artist: s.artist, id: s.id, source: s.source };
+ } else {
+ fetchError.value = '播放失败: ' + (res2.error || '未知错误');
+ showFetchError.value = true;
+ }
+ });
+ } else {
+ fetchError.value = '获取播放链接失败: ' + (res.error || '未知错误');
+ showFetchError.value = true;
+ }
+ }).catch(function(err) {
+ fetchError.value = '请求失败: ' + (err.message || '网络错误');
+ showFetchError.value = true;
  });
  }
         function toggleSelOnline(id) { var idx = selOnline.value.indexOf(id); if (idx >= 0) selOnline.value.splice(idx, 1); else selOnline.value.push(id); }
