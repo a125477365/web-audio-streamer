@@ -154,9 +154,9 @@ const wySearch = {
         const types = [];
         const _types = {};
 
-        // 解析可用音质
-        if (item.privilege) {
-          switch (item.privilege.maxbr) {
+ // 解析可用音质
+ if (item.privilege && item.privilege.maxbr > 0) {
+ switch (item.privilege.maxbr) {
             case 999000:
               types.push({ type: "flac", size: sizeFormate(item.sq?.size) });
               _types.flac = { size: sizeFormate(item.sq?.size) };
@@ -168,12 +168,18 @@ const wySearch = {
               types.push({ type: "128k", size: sizeFormate(item.l?.size) });
               _types["128k"] = { size: sizeFormate(item.l?.size) };
           }
-          if (item.privilege.maxBrLevel === "hires") {
-            types.push({ type: "flac24bit", size: sizeFormate(item.hr?.size) });
-            _types.flac24bit = { size: sizeFormate(item.hr?.size) };
-          }
-        }
-        types.reverse();
+ if (item.privilege.maxBrLevel === "hires") {
+ types.push({ type: "flac24bit", size: sizeFormate(item.hr?.size) });
+ _types.flac24bit = { size: sizeFormate(item.hr?.size) };
+ }
+ } else {
+ // 兜底：privilege.maxbr=0 时（版权限制），默认给 128k/320k 标签
+ types.push({ type: "320k", size: sizeFormate(item.h?.size) || "--" });
+ _types["320k"] = { size: sizeFormate(item.h?.size) || "--" };
+ types.push({ type: "128k", size: sizeFormate(item.l?.size) || "--" });
+ _types["128k"] = { size: sizeFormate(item.l?.size) || "--" };
+ }
+ types.reverse();
 
         return {
           singer: Array.isArray(item.artists)
@@ -421,10 +427,22 @@ const kgSearch = {
 // ============================================================
 
 export class MusicSearchSdk {
-  constructor() {
-    this.providers = { wy: wySearch, kw: kwSearch, kg: kgSearch };
-    this.defaultProvider = "wy";
-  }
+ constructor() {
+ this.providers = { wy: wySearch, kw: kwSearch, kg: kgSearch };
+ this.defaultProvider = "wy";
+ }
+
+ /**
+ * 动态添加搜索提供者
+ * @param {string} key - 平台标识
+ * @param {object} provider - 搜索提供者对象 (需有 id, name, search 方法)
+ */
+ addProvider(key, provider) {
+ if (provider && typeof provider.search === "function") {
+ this.providers[key] = provider;
+ console.log(`[MusicSearchSdk] ✅ 注册搜索源: ${provider.name || key}`);
+ }
+ }
 
   /**
    * 单平台搜索

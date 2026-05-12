@@ -141,7 +141,7 @@ class FFmpegDecoder extends EventEmitter {
 	}
 
 	decode(filePath, options, onData) {
-		const { sampleRate, channels, bitsPerSample, seekTime = 0, volume = 100 } = options;
+		const { sampleRate, channels, bitsPerSample, seekTime = 0, volume = 100, headers = {} } = options;
 		const currentId = ++this.currentId;
 		this.stop();
 
@@ -152,13 +152,25 @@ class FFmpegDecoder extends EventEmitter {
 
 		const ffmpegArgs = [
 			'-re',
-			'-ss', String(seekTime),  // 放在 -i 前面，做 input seeking（快速跳转）
+		];
+
+		// 注入 -headers（用于 CDN 防盗链，如 Referer/User-Agent）
+		const headerEntries = Object.entries(headers);
+		if (headerEntries.length > 0 && filePath.startsWith('http')) {
+			const headerStr = headerEntries
+				.map(([k, v]) => `${k}: ${v}`)
+				.join('\r\n');
+			ffmpegArgs.push('-headers', headerStr);
+		}
+
+		ffmpegArgs.push(
+			'-ss', String(seekTime), // 放在 -i 前面，做 input seeking（快速跳转）
 			'-i', filePath,
 			'-ar', String(sampleRate),
 			'-ac', String(channels),
 			'-f', `s${bitsPerSample}le`,
 			'-acodec', codec,
-		];
+		);
 
 		if (volume !== 100) {
 			ffmpegArgs.push('-af', `volume=${volume / 100}`);
@@ -353,10 +365,11 @@ export class AudioStreamer {
 		});
 	}
 
-	async playUrl(url, seekTime = 0) {
-		console.log(`[AudioStreamer] playUrl: ${url}`);
+	async playUrl(url, options = {}) {
+		const { headers = {}, seekTime = 0 } = typeof options === 'number' ? { seekTime: options } : options;
+		console.log(`[AudioStreamer] playUrl: ${url}`, Object.keys(headers).length > 0 ? `(headers: ${Object.keys(headers).join(',')})` : '');
 
-		const probe = this._probeAudio(url);
+		const probe = this._probeAudio(url, headers);
 		const { sampleRate, channels, bitsPerSample, duration } = probe;
 
 		const needReconfig = sampleRate !== this.currentSampleRate ||
@@ -385,14 +398,14 @@ export class AudioStreamer {
 			this._stopPlayback();
 		}
 
-		this.currentTrack = { url, type: 'url' };
+		this.currentTrack = { url, type: 'url', headers };
 		this.duration = duration;
 		this.seekOffset = seekTime;
 		this.playStartTime = Date.now();
 
 		this.sender.start(sampleRate, channels, bitsPerSample);
 		this.decoder.decode(url, {
-			sampleRate, channels, bitsPerSample, seekTime, volume: this.volume
+			sampleRate, channels, bitsPerSample, seekTime, volume: this.volume, headers
 		}, (data) => {
 			this.sender.feed(data);
 		});
@@ -416,7 +429,7 @@ export class AudioStreamer {
 		if (this.currentTrack.type === 'local') {
 			await this.playLocalFile(this.currentTrack.path, seekTime);
 		} else {
-			await this.playUrl(this.currentTrack.url, seekTime);
+			await this.playUrl(this.currentTrack.url, { headers: this.currentTrack.headers || {}, seekTime });
 		}
 	}
 
@@ -454,7 +467,7 @@ export class AudioStreamer {
 			if (this.currentTrack.type === 'local') {
 				this.playLocalFile(this.currentTrack.path, this.pausedTime);
 			} else {
-				this.playUrl(this.currentTrack.url, this.pausedTime);
+				this.playUrl(this.currentTrack.url, { headers: this.currentTrack.headers || {}, seekTime: this.pausedTime });
 			}
 		}
 	}
@@ -522,9 +535,18 @@ export class AudioStreamer {
 		this.sender.stop();
 	}
 
-	_probeAudio(input) {
+	_probeAudio(input, headers = {}) {
 		try {
-			const cmd = `ffprobe -v quiet -print_format json -show_streams -show_format "${input}"`;
+			// 构建 ffprobe 命令，注入 -headers（用于 CDN 防盗链）
+			let headerArg = '';
+			const headerEntries = Object.entries(headers);
+			if (headerEntries.length > 0 && input.startsWith('http')) {
+				const headerStr = headerEntries
+					.map(([k, v]) => `${k}: ${v}`)
+					.join('\r\n');
+				headerArg = `-headers "${headerStr.replace(/"/g, '\\"')}"`;
+			}
+			const cmd = `ffprobe ${headerArg} -v quiet -print_format json -show_streams -show_format "${input}"`;
 			const result = execSync(cmd, { timeout: 10000, encoding: 'utf-8', shell: true });
 			const info = JSON.parse(result);
 

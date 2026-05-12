@@ -20,12 +20,14 @@ const PLUGIN_CACHE_DIR = path.join(CONFIG_DIR, "plugins");
 const CONFIG_VERSION = 15;
 
 export class SourceManager {
-  constructor() {
-    this.config = null;
-    this._ensureConfigDir();
-    this.lxRuntime = new LxPluginRuntime();
-    this._pluginsLoaded = false;
-  }
+ constructor() {
+ this.config = null;
+ this._ensureConfigDir();
+ this.lxRuntime = new LxPluginRuntime();
+ this._pluginsLoaded = false;
+ // 本地音源目录（项目 sources/ 子目录）
+ this._localSourcesDir = path.join(path.dirname(import.meta.url.replace("file://", "")), "..", "sources");
+ }
 
   _ensureConfigDir() {
     if (!fs.existsSync(CONFIG_DIR)) {
@@ -174,7 +176,7 @@ export class SourceManager {
    * @returns {Promise<{loaded: number, failed: number, plugins: Array}>}
    */
  async loadLxPlugins(options = {}) {
- const { maxPlugins = 10, onLog = null } = options;
+ const { maxPlugins = 30, onLog = null } = options;
 
  if (this._pluginsLoaded) {
  return {
@@ -194,9 +196,39 @@ export class SourceManager {
 
  log("开始发现 LX 音源仓库...");
 
- // ====== 优先级：1.GitHub Search API → 2.Hermes Agent → 3.配置缓存 ======
+ // ====== 优先级：0.本地 sources/ 目录 → 1.GitHub Search API → 2.Hermes Agent → 3.配置缓存 ======
  let repos = [];
  let needAgentFallback = false; // 标记是否需要 Agent 搜索
+ const allLoaded = [];
+ const allFailed = [];
+
+ // ── 优先级0：先加载本地 sources/ 目录（保护已有本地插件不被覆盖）──
+ const localDir = this._localSourcesDir || null;
+ if (localDir) {
+ log(`📂 优先加载本地音源: ${localDir}`);
+ try {
+ const fs = await import("fs");
+ const path = await import("path");
+ const files = fs.readdirSync(localDir).filter(f => f.endsWith(".js"));
+ log(`发现 ${files.length} 个本地音源文件`);
+ for (const file of files) {
+ if (allLoaded.length >= maxPlugins) break;
+ try {
+ const code = fs.readFileSync(path.join(localDir, file), "utf-8");
+ const plugin = await this.lxRuntime.loadPlugin(`local:${file}`, code);
+ if (plugin) {
+ allLoaded.push(plugin);
+ log(`✅ 本地音源加载成功: ${plugin.name}`);
+ }
+ } catch (e) {
+ log(`❌ 本地音源 ${file} 加载失败: ${e.message}`);
+ allFailed.push({ repo: `local:${file}`, error: e.message });
+ }
+ }
+ } catch (e) {
+ log(`⚠️ 本地目录读取失败: ${e.message}`);
+ }
+ }
 
  // ── 优先级1：GitHub Search API ──
  log("① 通过 GitHub Search API 搜索最新音源仓库...");
@@ -218,9 +250,8 @@ export class SourceManager {
  needAgentFallback = true;
  }
 
- // ── 优先级2：从 GitHub 仓库加载 JS 插件 ──
- const allLoaded = [];
- const allFailed = [];
+// ── 优先级2：从 GitHub 仓库加载 JS 插件 ──
+// allLoaded/allFailed 已在优先级0中声明和初始化
 
  if (repos.length > 0) {
  log(`从 ${repos.length} 个 GitHub 仓库加载插件...`);
@@ -243,6 +274,8 @@ export class SourceManager {
  log("⚠️ GitHub 仓库中的 JS 插件均不可用，需要 Hermes Agent 搜索");
  needAgentFallback = true;
  }
+
+ // ── 本地 sources/ 目录已在优先级0加载，此处跳过 ──
 
  // ── 优先级3（延后处理）：Hermes Agent 搜索 ──
  // 注意：Agent 搜索是异步的，需要调用方(index.js)轮询结果

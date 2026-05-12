@@ -43,7 +43,7 @@ const wss = new WebSocketServer({ server });
 // 中间件
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "../web-ui")));
+app.use(express.static(path.join(__dirname, "../web-ui"), { etag: false, maxAge: 0, setHeaders: (res) => { res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate"); res.setHeader("Pragma", "no-cache"); res.setHeader("Expires", "0"); } }));
 app.use("/music", express.static(musicDir));
 
 // 初始化模块
@@ -198,14 +198,32 @@ app.get("/api/local/browse", (req, res) => {
  * 保存最后浏览的目录路径
  */
 app.post("/api/local/save-path", (req, res) => {
-  try {
-    const { path } = req.body;
-    config.music.lastBrowse = path || "";
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-    res.json({ success: true, path: config.music.lastBrowse });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+ try {
+ const { path } = req.body;
+ config.music.lastBrowse = path || "";
+ fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+ res.json({ success: true, path: config.music.lastBrowse });
+ } catch (error) {
+ res.status(500).json({ success: false, error: error.message });
+ }
+});
+
+// ESP32 设备配置：读取 + 保存
+app.get("/api/esp32/config", (req, res) => {
+ res.json({ success: true, host: config.esp32.host, port: config.esp32.port });
+});
+
+app.post("/api/esp32/config", (req, res) => {
+ try {
+ const { host, port } = req.body;
+ if (host) config.esp32.host = host;
+ if (port) config.esp32.port = parseInt(port) || 8000;
+ fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+ console.log(`[ESP32] 配置已保存: ${config.esp32.host}:${config.esp32.port}`);
+ res.json({ success: true, host: config.esp32.host, port: config.esp32.port });
+ } catch (error) {
+ res.status(500).json({ success: false, error: error.message });
+ }
 });
 
 /**
@@ -404,41 +422,105 @@ app.get("/api/online/song", async (req, res) => {
  * 优先通过 LX 插件获取（多源并发），其次 fallback 到旧 API
  */
 app.get("/api/online/url", async (req, res) => {
-  try {
-    const { id, source, quality } = req.query;
-    if (!id) {
-      return res.status(400).json({ success: false, error: "Missing song id" });
-    }
+ try {
+ const { id, source, quality, title, artist } = req.query;
+ if (!id) {
+ return res.status(400).json({ success: false, error: "Missing song id" });
+ }
 
-    const songInfo = { source: source || "wy", id: String(id) };
-    const url = await onlineApi.getSongUrl(id, songInfo, quality || "320k");
-    res.json({ success: true, url });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+ const songInfo = { source: source || "wy", id: String(id), title: title || "", artist: artist || "" };
+ const result = await onlineApi.getSongUrl(id, songInfo, quality || "320k");
+ // result = { url, headers, isTrial, actualSize, crossSource }
+ res.json({
+ success: true,
+ url: result.url,
+ headers: result.headers,
+ isTrial: result.isTrial || false,
+ actualSize: result.actualSize || -1,
+ crossSource: result.crossSource || null,
+ });
+ } catch (error) {
+ res.status(500).json({ success: false, error: error.message });
+ }
 });
 
 /**
  * 播放在线歌曲
  */
 app.get("/api/online/play", async (req, res) => {
-  try {
-    const { id, url } = req.query;
-    // 优先使用直接传入的URL（搜索结果中已包含auth）
-    let playUrl = url;
-    if (!playUrl && id) {
-      playUrl = await onlineApi.getSongUrl(id);
-    }
-    if (!playUrl) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Missing song url or id" });
-    }
-    await audioStreamer.playUrl(playUrl);
-    res.json({ success: true, message: "Playing online song" });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+ try {
+ const { id, url, source, title, artist } = req.query;
+ // 优先使用直接传入的URL（搜索结果中已包含auth）
+ let playUrl = url;
+ let playHeaders = {};
+ let isTrial = false;
+ if (!playUrl && id) {
+ try {
+ const songInfo = { source: source || "wy", id: String(id), title: title || "", artist: artist || "" };
+ const result = await onlineApi.getSongUrl(id, songInfo);
+ playUrl = result.url;
+ playHeaders = result.headers || {};
+ isTrial = result.isTrial || false;
+ } catch (urlErr) {
+ const msg = urlErr.message || '';
+ let detail = '';
+ if (msg.includes('block ip') || msg.includes('403')) {
+ detail = '音源服务器封禁了当前IP地址，请切换音源或稍后重试';
+ } else if (msg.includes('ENOTFOUND') || msg.includes('getaddrinfo')) {
+ detail = '音源域名无法解析，该音源可能已下线，请切换音源';
+ } else if (msg.includes('ECONNREFUSED')) {
+ detail = '音源服务器拒绝连接，该音源可能已关闭，请切换音源';
+ } else if (msg.includes('timeout') || msg.includes('ETIMEDOUT')) {
+ detail = '连接音源超时，网络可能不稳定，请稍后重试';
+ } else if (msg.includes('所有音源均无法')) {
+ detail = '已尝试所有可用音源均失败，可能是版权限制或音源均已失效';
+ } else {
+ detail = '无法获取播放链接，可能是版权限制或音源失效';
+ }
+ return res.status(502).json({
+ success: false,
+ error: "获取播放链接失败: " + msg,
+ detail: detail
+ });
+ }
+ }
+ if (!playUrl) {
+ return res.status(400).json({
+ success: false,
+ error: "缺少歌曲ID或播放链接",
+ detail: "请提供 id 或 url 参数"
+ });
+ }
+ try {
+ await audioStreamer.playUrl(playUrl, { headers: playHeaders });
+ } catch (playErr) {
+ const msg = playErr.message || '';
+ let detail = '';
+ if (msg.includes('No ACK')) {
+ detail = 'ESP32 播放设备未连接或无响应，请检查设备电源和网络连接';
+ } else if (msg.includes('ffprobe') || msg.includes('Invalid data') || msg.includes('find format')) {
+ detail = '音频格式不受支持或链接已失效，请尝试其他歌曲';
+ } else if (msg.includes('ECONNREFUSED') || msg.includes('ENOTFOUND') || msg.includes('403') || msg.includes('404')) {
+ detail = '音频服务器拒绝访问或链接已过期，请重新搜索播放';
+ } else if (msg.includes('timeout') || msg.includes('ETIMEDOUT')) {
+ detail = '连接音频服务器超时，网络可能不稳定，请稍后重试';
+ } else {
+ detail = '播放器出现意外错误，请稍后重试或尝试其他歌曲';
+ }
+ return res.status(502).json({
+ success: false,
+ error: "播放失败: " + msg,
+ detail: detail
+ });
+ }
+ res.json({ success: true, message: "Playing online song", isTrial: isTrial });
+ } catch (error) {
+ res.status(500).json({
+ success: false,
+ error: "服务器错误: " + error.message,
+ detail: "意外的服务端错误，请稍后重试"
+ });
+ }
 });
 
 /**
@@ -645,9 +727,11 @@ app.get("/api/source/fetch/stream", async (req, res) => {
  sendLog("🔄 开始刷新音源插件...");
 
  try {
- // 重置插件状态，重新加载
+ // 增量刷新：保留已有 runtime 和本地插件，只允许重新加载
  sourceManager._pluginsLoaded = false;
- sourceManager.lxRuntime = new (await import("./lx-plugin-runtime.js")).LxPluginRuntime();
+ // 不再重建 lxRuntime（避免丢失已有的 19 个本地音源插件）
+ // loadLxPlugins 会增量加载 GitHub 插件 + 本地 sources/ 目录
+ // 同步 runtime 引用（不变）
  onlineApi.lxRuntime = sourceManager.lxRuntime;
  downloader.setLxRuntime(sourceManager.lxRuntime);
 
@@ -931,19 +1015,19 @@ app.get("/api/source/status", (req, res) => {
  * GET /api/lx/plugins
  */
 app.get("/api/lx/plugins", (req, res) => {
-  try {
-    const runtime = sourceManager.getLxRuntime();
-    const status = runtime.getStatus();
+ try {
+ const runtime = sourceManager.getLxRuntime();
+ const status = runtime.getStatus();
  res.json({
  success: true,
  pluginCount: status.pluginCount,
  allSources: status.allSources,
- plugins: status.plugins,
+ plugins: status.plugins, // now includes health data
  preferredPlugin: status.preferredPlugin,
  });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+ } catch (error) {
+ res.status(500).json({ success: false, error: error.message });
+ }
 });
 
 /**

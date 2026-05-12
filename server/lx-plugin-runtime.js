@@ -47,6 +47,8 @@ class LxPluginSandbox {
  this.requestHandler = null;
  this.enabled = true; // 用户可禁用单个插件
  this.timeout = options.timeout || 15000;
+ // 健康追踪
+ this.stats = { success: 0, fail: 0, lastSuccess: null, lastFail: null, avgResponseMs: 0, _totalMs: 0, _count: 0 };
   }
 
   /**
@@ -413,31 +415,49 @@ globalThis.__lx_init_error_handler__.sendError(err.message);
 
   /**
    * 通过插件的 request handler 获取播放链接
-   * 与洛雪的 handleRequest({action: 'musicUrl'}) 完全一致
-   */
-  async getMusicUrl(source, musicInfo, quality = "320k") {
-    if (!this.requestHandler) {
-      throw new Error(`插件 ${this.name} 未初始化`);
-    }
+* 与洛雪的 handleRequest({action: 'musicUrl'}) 完全一致
+ */
+ async getMusicUrl(source, musicInfo, quality = "320k") {
+ if (!this.requestHandler) {
+ throw new Error(`插件 ${this.name} 未初始化`);
+ }
 
-    try {
-      const result = await this.requestHandler({
-        source,
-        action: "musicUrl",
-        info: { musicInfo, type: quality },
-      });
+ const startTime = Date.now();
+ try {
+ const result = await this.requestHandler({
+ source,
+ action: "musicUrl",
+ info: { musicInfo, type: quality },
+ });
 
-      if (typeof result === "string") return result;
-      if (result?.url) return result.url;
-      if (result?.data?.url) return result.data.url;
+ // 记录成功
+ const elapsed = Date.now() - startTime;
+ this.stats.success++;
+ this.stats.lastSuccess = new Date().toISOString();
+ this.stats._count++;
+ this.stats._totalMs += elapsed;
+ this.stats.avgResponseMs = Math.round(this.stats._totalMs / this.stats._count);
 
-      throw new Error("插件返回了无法识别的格式");
-    } catch (err) {
-      throw new Error(`[${this.name}] ${err.message}`);
-    }
-  }
+	// 洛雪插件可能返回: string | { url, headers } | { data: { url, headers } }
+	// 必须保留 headers（Referer/User-Agent），否则后续请求会被CDN 403拒绝
+	if (typeof result === "string") return { url: result, headers: {} };
+	if (result?.url) return { url: result.url, headers: result.headers || {} };
+	if (result?.data?.url) return { url: result.data.url, headers: result.data.headers || result.headers || {} };
 
-  _extractSourcesFromCode() {
+	throw new Error("插件返回了无法识别的格式");
+ } catch (err) {
+ // 记录失败
+ const elapsed = Date.now() - startTime;
+ this.stats.fail++;
+ this.stats.lastFail = new Date().toISOString();
+ this.stats._count++;
+ this.stats._totalMs += elapsed;
+ this.stats.avgResponseMs = Math.round(this.stats._totalMs / this.stats._count);
+ throw new Error(`[${this.name}] ${err.message}`);
+ }
+ }
+
+ _extractSourcesFromCode() {
     const sourcesMatch = this.scriptCode.match(
       /sources\s*:\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}/
     );
@@ -610,8 +630,8 @@ export class LxPluginRuntime {
    * 
    * @param {object} songInfo - 标准化歌曲信息（必须含 source + songmid）
    * @param {string} quality - 音质 (128k/320k/flac)
-   * @returns {Promise<string>} mp3 播放链接
-   */
+ * @returns {Promise<{url: string, headers: object}>} 播放链接 + 必需的请求头
+ */
  async getMusicUrl(songInfo, quality = "320k") {
  const source = songInfo.source || "wy";
  const musicInfo = {
@@ -637,34 +657,84 @@ export class LxPluginRuntime {
  const preferred = compatiblePlugins.find(
  (p) => p.name === this.preferredPluginName
  );
- if (preferred) {
- console.log(`[LxRuntime] 优先使用插件: ${preferred.name}`);
- try {
- const url = await preferred.getMusicUrl(source, musicInfo, quality);
- return url;
- } catch (err) {
- console.warn(`[LxRuntime] 优先插件 ${preferred.name} 失败: ${err.message}，回退到并发模式`);
- }
+		if (preferred) {
+			console.log(`[LxRuntime] 优先使用插件: ${preferred.name}`);
+			try {
+				const result = await preferred.getMusicUrl(source, musicInfo, quality);
+				return result; // { url, headers }
+			} catch (err) {
+				console.warn(`[LxRuntime] 优先插件 ${preferred.name} 失败: ${err.message}，回退到并发模式`);
+			}
  }
  }
 
- // 多源并发！Promise.any: 谁先成功用谁的
- const attempts = compatiblePlugins.map((plugin) =>
- plugin
- .getMusicUrl(source, musicInfo, quality)
- .catch((err) => {
+ // 多源并发！竞速+URL验证：谁先返回可访问URL用谁的
+ const results = []; // 收集所有成功结果
+ const urlValidateTimeout = 5000; // URL验证超时5秒
+
+ // 快速验证URL可达性（HEAD请求，只检查能否连接）
+ const validateUrl = async (url, headers = {}) => {
+ try {
+ const urlObj = new URL(url);
+ const mod = urlObj.protocol === 'https:' ? await import('node:https') : await import('node:http');
+ return new Promise((resolve) => {
+ const req = mod.request(urlObj, { method: 'HEAD', timeout: urlValidateTimeout }, (res) => {
+ const cl = parseInt(res.headers['content-length'] || '0', 10);
+ resolve({ ok: true, contentLength: cl, statusCode: res.statusCode });
+ });
+ req.on('error', () => resolve({ ok: false }));
+ req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
+ req.end();
+ });
+ } catch {
+ return { ok: false };
+ }
+ };
+
+ // 并发获取+验证
+ const attempts = compatiblePlugins.map(async (plugin) => {
+ try {
+ const result = await plugin.getMusicUrl(source, musicInfo, quality);
+ results.push({ plugin: plugin.name, result });
+ return { plugin: plugin.name, result };
+ } catch (err) {
  console.warn(`[LxRuntime] ${plugin.name} 失败: ${err.message}`);
  throw err;
- })
- );
-
- try {
- const url = await Promise.any(attempts);
- return url;
- } catch (aggregateError) {
- const errors = aggregateError?.errors?.map(e => e?.message).filter(Boolean).join('; ') || '未知错误';
- throw new Error(`所有音源均无法获取播放链接: ${songInfo.title} (${errors})`);
  }
+ });
+
+ // 等待至少一个结果返回
+ const firstResult = await Promise.any(attempts).catch(() => null);
+
+ // 如果很快就有结果，给其他插件1秒机会也返回
+ if (firstResult && results.length < compatiblePlugins.length) {
+ await new Promise(r => setTimeout(r, 1000));
+ }
+
+ // 按返回顺序验证所有已收集的URL
+ for (const { plugin, result } of results) {
+ const url = result?.url;
+ if (!url) continue;
+
+ const v = await validateUrl(url, result.headers || {});
+ if (v.ok) {
+ const sizeMB = v.contentLength ? (v.contentLength / 1024 / 1024).toFixed(1) : '?';
+ console.log(`[LxRuntime] ✅ 选中: ${plugin} | URL可达 | ${sizeMB}MB | ${new URL(url).hostname}`);
+ return result; // { url, headers }
+ } else {
+ console.warn(`[LxRuntime] ⏭️ ${plugin} 返回的URL不可达: ${new URL(url).hostname}`);
+ }
+ }
+
+ // 所有URL都不可达
+ if (results.length > 0) {
+ // 最后尝试：返回第一个结果，让前端自行处理
+ console.warn(`[LxRuntime] ⚠️ 所有URL均不可达，返回第一个结果作为fallback`);
+ return results[0].result;
+ }
+
+ const errors = '所有音源均返回不可达的URL';
+ throw new Error(`所有音源均无法获取播放链接: ${songInfo.title} (${errors})`);
  }
 
  /**
@@ -723,21 +793,28 @@ export class LxPluginRuntime {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    const playUrl = await this.getMusicUrl(songInfo);
+ const { url: playUrl, headers: playHeaders } = await this.getMusicUrl(songInfo);
 
-    return new Promise((resolve, reject) => {
-      const parsedUrl = new URL(playUrl);
-      const lib = parsedUrl.protocol === "https:" ? https : http;
+ return new Promise((resolve, reject) => {
+ const parsedUrl = new URL(playUrl);
+ const lib = parsedUrl.protocol === "https:" ? https : http;
 
-      const file = fs.createWriteStream(savePath);
+ const file = fs.createWriteStream(savePath);
 
-      const doRequest = (url) => {
-        const p = new URL(url);
-        const l = p.protocol === "https:" ? https : http;
+ const doRequest = (url) => {
+ const p = new URL(url);
+ const l = p.protocol === "https:" ? https : http;
 
-        l.get(url, {
-          headers: { "User-Agent": "Mozilla/5.0", Referer: "" },
-        }, (res) => {
+ // 合并插件返回的 headers 与默认 headers
+ const reqHeaders = {
+ "User-Agent": "Mozilla/5.0",
+ Referer: "",
+ ...playHeaders,
+ };
+
+ l.get(url, {
+ headers: reqHeaders,
+ }, (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
             const nextUrl = res.headers.location.startsWith("http")
               ? res.headers.location
@@ -779,13 +856,25 @@ export class LxPluginRuntime {
  getStatus() {
  return {
  pluginCount: this.plugins.length,
- plugins: this.plugins.map((p) => ({
+ plugins: this.plugins.map((p) => {
+ const totalReqs = p.stats.success + p.stats.fail;
+ const healthScore = totalReqs > 0 ? Math.round((p.stats.success / totalReqs) * 100) : (p.initialized ? 100 : 0);
+ return {
  name: p.name,
  version: p.version,
  sources: Object.keys(p.supportedSources),
  initialized: p.initialized,
  enabled: p.enabled,
- })),
+ health: {
+ score: healthScore,
+ success: p.stats.success,
+ fail: p.stats.fail,
+ avgResponseMs: p.stats.avgResponseMs,
+ lastSuccess: p.stats.lastSuccess,
+ lastFail: p.stats.lastFail,
+ },
+ };
+ }),
  allSources: this.getSupportedSources(),
  preferredPlugin: this.preferredPluginName || null,
  };
