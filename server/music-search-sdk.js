@@ -522,6 +522,8 @@ export class MusicSearchSdk {
       let duration = 0;
       if (song._interval) {
         duration = song._interval;
+      } else if (song.duration) {
+        duration = Number(song.duration) || 0;
       } else if (song.interval) {
         const parts = String(song.interval).split(":");
         if (parts.length === 2) {
@@ -536,12 +538,13 @@ export class MusicSearchSdk {
       const qualityMap = { flac24bit: 95, flac: 85, "320k": 70, "128k": 50 };
       const qualityScore = qualityMap[bestType] || 50;
 
+      const songId = song.songmid || song.id;
       return {
-        id: String(song.songmid),
-        songmid: String(song.songmid),
-        title: song.name || "",
-        artist: song.singer || "",
-        album: song.albumName || "",
+        id: String(songId),
+        songmid: String(songId),
+        title: song.name || song.title || "",
+        artist: song.singer || song.artist || "",
+        album: song.albumName || song.album || "",
         albumId: song.albumId || "",
         cover: song.img || "",
         duration,
@@ -551,6 +554,9 @@ export class MusicSearchSdk {
         qualityScore,
         types: song.types || [],
         _types: song._types || {},
+        strMediaMid: song.strMediaMid || "",
+        isVip: song.isVip,
+        fee: song.fee,
         hash: song.hash || "",  // 酷狗需要 hash
         playUrl: "", // 延迟到播放时获取
       };

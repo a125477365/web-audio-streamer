@@ -138,9 +138,10 @@
  /* Toast 通知 */
  .toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; max-width: 380px; }
  .toast-item { padding: 12px 36px 12px 16px; border-radius: 8px; background: #1e1e3a; border: 1px solid #333; color: #fff; font-size: 13px; position: relative; animation: toast-in 0.3s ease; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
- .toast-error { border-color: #f87171; background: linear-gradient(135deg, #1e1e3a 0%, #2d1b1b 100%); }
- .toast-info { border-color: #60a5fa; background: linear-gradient(135deg, #1e1e3a 0%, #1b2d3a 100%); }
- .toast-success { border-color: #34d399; background: linear-gradient(135deg, #1e1e3a 0%, #1b2d2a 100%); }
+.toast-error { border-color: #f87171; background: linear-gradient(135deg, #1e1e3a 0%, #2d1b1b 100%); }
+.toast-info { border-color: #60a5fa; background: linear-gradient(135deg, #1e1e3a 0%, #1b2d3a 100%); }
+.toast-success { border-color: #34d399; background: linear-gradient(135deg, #1e1e3a 0%, #1b2d2a 100%); }
+.toast-warning { border-color: #fbbf24; background: linear-gradient(135deg, #1e1e3a 0%, #2d2615 100%); }
  .toast-title { font-weight: 600; margin-bottom: 2px; }
  .toast-detail { color: #aaa; font-size: 12px; line-height: 1.4; }
  .toast-close { position: absolute; top: 8px; right: 8px; background: none; border: none; color: #888; cursor: pointer; font-size: 14px; padding: 2px 6px; }
@@ -820,12 +821,12 @@ function doSearch() {
 
  function isTrialRisk(s) {
  // 有高音质(320k/flac)的VIP歌曲可能是试听版
- if (!s.types || !Array.isArray(s.types) || s.types.length === 0) return false;
- var typeNames = s.types.map(function(t) { return t.type; });
- return typeNames.some(function(t) { return t === 'flac' || t === 'flac24bit' || t === '320k'; });
+ if (s && s.isTrial === true) return true;
+ return false;
  }
 
  function isFreeFull(s) {
+ if (s && s.playable === true && s.isTrial !== true) return true;
  // 有高品质源可用+LX音源支持 → 大概率可获取完整版
  if (!s.types || !Array.isArray(s.types) || s.types.length === 0) return false;
  var typeNames = s.types.map(function(t) { return t.type; });
@@ -842,10 +843,15 @@ function doSearch() {
  if (s.source) params += '&source=' + encodeURIComponent(s.source);
  if (s.title) params += '&title=' + encodeURIComponent(s.title);
  if (s.artist) params += '&artist=' + encodeURIComponent(s.artist);
+ if (s.hash) params += '&hash=' + encodeURIComponent(s.hash);
+ if (s.albumId) params += '&albumId=' + encodeURIComponent(s.albumId);
+ if (s.strMediaMid) params += '&strMediaMid=' + encodeURIComponent(s.strMediaMid);
  apiGet('/online/play?' + params).then(function(res) {
  if (res.success) {
  track.value = { title: s.title, artist: s.artist, id: s.id, source: s.source };
- if (res.isTrial) {
+ if (res.playbackStarted === false) {
+ showToast('设备未响应', res.detail || res.message || '已获取播放链接，但 ESP32 未响应。', 'warning');
+ } else if (res.isTrial) {
  showToast('⚠️ 试听版', s.title + ' - 该歌曲可能仅提供试听片段，后端已自动尝试其他源', 'warning');
  } else {
  showToast('🎵 正在播放', s.title + ' - ' + (s.artist || ''), 'success');
@@ -860,7 +866,7 @@ function doSearch() {
         function toggleSelOnline(id) { var idx = selOnline.value.indexOf(id); if (idx >= 0) selOnline.value.splice(idx, 1); else selOnline.value.push(id); }
         function playSelectedOnline() {
           if (selOnline.value.length === 0) return;
-          var list = selOnline.value.map(function(id) { var s = results.value.find(function(x) { return x.id === id; }); return s ? { title: s.title, artist: s.artist, id: s.id, source: s.source, duration: s.duration || 0 } : { title: id, id: id, duration: 0 }; });
+          var list = selOnline.value.map(function(id) { var s = results.value.find(function(x) { return x.id === id; }); return s ? { title: s.title, artist: s.artist, id: s.id, source: s.source, duration: s.duration || 0, hash: s.hash, albumId: s.albumId, strMediaMid: s.strMediaMid } : { title: id, id: id, duration: 0 }; });
           playlist.value = list; playlistIdx.value = 0;
           var first = results.value.find(function(x) { return x.id === selOnline.value[0]; }); if (first) playOnline(first);
         }
@@ -954,7 +960,7 @@ function doSearch() {
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,
           loadDirs, pickDir, confirmDir,
 doSearch, playOnline, toggleSelOnline, playSelectedOnline,
-fmtDur, bestType,
+fmtDur, bestType, isTrialRisk, isFreeFull,
           startFM, stopFM,
           playRadio, playCustomRadio,
  togglePlay, setVolume, seek, prev, next, togglePlayMode,

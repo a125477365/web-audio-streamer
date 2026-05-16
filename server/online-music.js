@@ -2,21 +2,21 @@
  * 在线音乐 API — 重构后架构
  * 
  * 职责分离（与洛雪音乐完全一致）：
- * - 搜索：委托给 MusicSearchSdk（内置网易云/酷我/酷狗搜索实现）
- * - 播放链接：委托给 LxPluginRuntime（通过JS音源脚本获取）
+ * - 搜索：委托给 MusicSearchSdk（与洛雪类似，搜索层由应用内置平台接口完成）
+ * - 播放链接：委托给 LxPluginRuntime（自定义音源脚本的 musicUrl action）
  * - 本模块只做协调和格式转换
  * 
  * 流程：
  * 1. 用户搜索 → search() → MusicSearchSdk.searchMulti() → 返回标准化歌曲列表
- * 2. 用户播放 → getSongUrl() → LxPluginRuntime.getMusicUrl() → 返回mp3链接
- * 3. 前端拿到mp3链接 → 传给 AudioStreamer 播放
+ * 2. 若已安装最新音源，搜索阶段可额外验证可播/非试听并排序
+ * 3. 用户播放 → getSongUrl() → LxPluginRuntime.getMusicUrl() → 返回mp3链接
+ * 4. 前端拿到mp3链接 → 传给 AudioStreamer 播放
  */
 
 import https from "https";
 import http from "http";
 import { MusicSearchSdk } from "./music-search-sdk.js";
 import { qqSearch } from "./qq-music-search.js";
-import { getQQMusicUrl } from "./qq-music-search.js";
 
 export class OnlineMusicApi {
   /**
@@ -29,6 +29,8 @@ export class OnlineMusicApi {
     this.searchSdk = new MusicSearchSdk();
  // 注册QQ音乐搜索
  this.searchSdk.addProvider("tx", qqSearch);
+    this.urlCache = new Map();
+    this.urlCacheTtlMs = 10 * 60 * 1000;
 
     // 向后兼容
     this.source = null;
@@ -220,12 +222,33 @@ export class OnlineMusicApi {
  }
 
  // 过滤掉过短的试听（< 90秒）
- const filtered = displayResults.filter((song) => {
- if (!song.duration) return true;
- return song.duration >= 90;
- });
+  const filtered = displayResults.filter((song) => {
+  if (!song.duration) return true;
+  return song.duration >= 90;
+  });
+  const relevant = filtered.filter((song) => this._matchesQuery(song, queryTerms));
+  const candidates = relevant.length > 0 ? relevant : filtered;
 
-      return filtered;
+      if (options.fullOnly === false) {
+        return candidates.slice(0, Number.parseInt(options.limit, 10) || 30);
+      }
+
+      if (!this._hasLatestSourcePlugins()) {
+        return candidates
+          .slice(0, Number.parseInt(options.limit, 10) || 30)
+          .map((song) => ({
+            ...song,
+            playable: false,
+            needsSource: true,
+            isTrial: null,
+          }));
+      }
+
+      return await this._filterPlayableFullResults(candidates, {
+        limit: Number.parseInt(options.limit, 10) || 30,
+        verifyLimit: Number.parseInt(options.verifyLimit, 10) || Math.max((Number.parseInt(options.limit, 10) || 30) * 3, 60),
+        concurrency: Number.parseInt(options.verifyConcurrency, 10) || 6,
+      });
     } catch (error) {
       console.error("[OnlineMusicApi] 搜索失败:", error.message);
       return {
@@ -235,6 +258,118 @@ export class OnlineMusicApi {
     }
   }
 
+  _matchesQuery(song, queryTerms) {
+    const terms = (queryTerms || []).filter(Boolean);
+    if (terms.length === 0) return true;
+    const haystack = `${song.title || ""} ${song.artist || ""} ${song.album || ""}`.toLowerCase();
+    return terms.some((term) => haystack.includes(term));
+  }
+
+  _hasLatestSourcePlugins() {
+    return Boolean(this.lxRuntime && Array.isArray(this.lxRuntime.plugins) && this.lxRuntime.plugins.length > 0);
+  }
+
+  _qualityRank(type = "") {
+    const normalized = String(type || "").toLowerCase();
+    const map = { flac24bit: 5, flac: 4, ape: 4, wav: 4, "320k": 3, "128k": 1 };
+    return map[normalized] || 0;
+  }
+
+  _bestQualityRank(song = {}) {
+    let best = this._qualityRank(song.resolvedQuality || song.quality || "");
+    for (const item of song.types || []) {
+      best = Math.max(best, this._qualityRank(item?.type));
+    }
+    return best;
+  }
+
+  _parseSizeToBytes(sizeText) {
+    if (typeof sizeText === "number" && Number.isFinite(sizeText)) return sizeText;
+    const match = String(sizeText || "").match(/([\d.]+)\s*(B|KB|K|MB|M|GB|G)/i);
+    if (!match) return 0;
+    const value = Number.parseFloat(match[1]);
+    if (!Number.isFinite(value)) return 0;
+    const unit = match[2].toUpperCase();
+    const multiplier = { B: 1, K: 1024, KB: 1024, M: 1024 ** 2, MB: 1024 ** 2, G: 1024 ** 3, GB: 1024 ** 3 };
+    return Math.round(value * (multiplier[unit] || 1));
+  }
+
+  _bestDeclaredSize(song = {}) {
+    let best = 0;
+    for (const item of song.types || []) {
+      best = Math.max(best, this._parseSizeToBytes(item?.size));
+    }
+    return best;
+  }
+
+  _verifiedSize(song = {}) {
+    const actual = Number(song.actualSize || 0);
+    if (Number.isFinite(actual) && actual > 0) return actual;
+    return this._bestDeclaredSize(song);
+  }
+
+  _sortPlayableResults(results = []) {
+    return [...results].sort((a, b) => {
+      const aLossless = this._bestQualityRank(a) >= 4 ? 1 : 0;
+      const bLossless = this._bestQualityRank(b) >= 4 ? 1 : 0;
+      if (aLossless !== bLossless) return bLossless - aLossless;
+
+      const aFull = a.playable === true && a.isTrial !== true ? 1 : 0;
+      const bFull = b.playable === true && b.isTrial !== true ? 1 : 0;
+      if (aFull !== bFull) return bFull - aFull;
+
+      const aSize = this._verifiedSize(a);
+      const bSize = this._verifiedSize(b);
+      const aHasSize = aSize > 0 ? 1 : 0;
+      const bHasSize = bSize > 0 ? 1 : 0;
+      if (aHasSize !== bHasSize) return bHasSize - aHasSize;
+      if (aSize !== bSize) return bSize - aSize;
+
+      const aQuality = this._bestQualityRank(a);
+      const bQuality = this._bestQualityRank(b);
+      if (aQuality !== bQuality) return bQuality - aQuality;
+
+      return (a._rankIndex || 0) - (b._rankIndex || 0);
+    });
+  }
+
+  async _filterPlayableFullResults(results, options = {}) {
+    const limit = options.limit || 30;
+    const verifyLimit = options.verifyLimit || Math.max(limit * 3, 60);
+    const concurrency = Math.max(1, options.concurrency || 6);
+    const candidates = results
+      .map((song, index) => ({ ...song, _rankIndex: index }))
+      .filter((song) => song && song.id && song.title && song.artist && song.source)
+      .slice(0, verifyLimit);
+    const accepted = [];
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < candidates.length) {
+        const song = candidates[cursor++];
+        try {
+          const result = await this.getSongUrl(song.id, song, "320k", { allowTrial: false });
+          if (!result?.url || result.isTrial) continue;
+          accepted.push({
+            ...song,
+            playable: true,
+            isTrial: false,
+            actualSize: result.actualSize || this._bestDeclaredSize(song) || -1,
+            resolvedQuality: result.quality || "",
+            crossSource: result.crossSource || null,
+          });
+        } catch (err) {
+          console.warn(`[OnlineMusicApi] 跳过不可播放/试听结果: ${song.source}/${song.id} ${song.title} - ${err.message}`);
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    return this._sortPlayableResults(accepted)
+      .slice(0, limit)
+      .map(({ _rankIndex, ...song }) => song);
+  }
+
   // ==========================================================
   // 播放链接获取 — 委托给 LxPluginRuntime
   // ==========================================================
@@ -242,33 +377,23 @@ export class OnlineMusicApi {
   /**
    * 获取歌曲播放链接
    * 
-   * 优先使用 LX Runtime（多插件并发），回退到直连
+   * 使用 LX Runtime（多插件并发），不走平台直连兜底。
    * 
    * @param {string} id - 歌曲ID (songmid)
    * @param {object} songInfo - 歌曲完整信息
    * @param {string} quality - 音质 (128k/320k/flac)
  * @returns {Promise<{url: string, headers: object}>} 播放链接 + 必需的请求头
  */
- async getSongUrl(id, songInfo = {}, quality = "320k") {
- // QQ音乐：直接使用 vkey 接口获取（无需LX插件）
- if (songInfo.source === "tx") {
- console.log(`[OnlineMusicApi] 🎵 QQ音乐直连获取: ${id}/${quality}`);
- try {
- const qqResult = await getQQMusicUrl(id, songInfo.strMediaMid || id, quality);
- if (qqResult.url) {
- return {
- url: qqResult.url,
- headers: {},
- isTrial: qqResult.isTrial,
- actualSize: qqResult.actualSize,
- };
+ async getSongUrl(id, songInfo = {}, quality = "320k", options = {}) {
+ if (!this.lxRuntime || this.lxRuntime.plugins.length === 0) {
+ throw new Error("尚未安装最新音源，请先在设置中执行“搜索最新音源”并成功加载后再播放");
  }
- } catch (e) {
- console.warn(`[OnlineMusicApi] QQ音乐vkey获取失败: ${e.message}`);
+ const allowTrial = options.allowTrial === true;
+ const cacheKey = this._urlCacheKey(id, songInfo, quality);
+ const cached = this._getCachedUrl(cacheKey);
+ if (cached && (allowTrial || !cached.isTrial)) {
+ return cached;
  }
- // vkey失败，回退到LX插件
- }
-
  // 尝试所有音质降级：flac → 320k → 128k
  const qualityOrder = ["flac", "320k", "128k"];
  const startIdx = qualityOrder.indexOf(quality);
@@ -278,7 +403,7 @@ export class OnlineMusicApi {
 
  for (const q of qualities) {
  try {
- const result = await this._getSongUrlSingle(id, songInfo, q);
+  const result = this._normalizeSongUrlResult(await this._getSongUrlSingle(id, songInfo, q));
  // 试听检测：HEAD 检查实际文件大小
  const trialCheck = await this._checkTrialUrl(result.url, result.headers);
  if (trialCheck.isTrial) {
@@ -290,7 +415,10 @@ export class OnlineMusicApi {
  continue;
  }
  result.isTrial = false;
+ result.quality = q;
  result.actualSize = trialCheck.actualSize;
+ this._setCachedUrl(this._urlCacheKey(id, songInfo, q), result);
+ this._setCachedUrl(cacheKey, result);
  console.log(`[OnlineMusicApi] ✅ 获取播放链接成功: ${songInfo.source}/${id} ${q} → ${trialCheck.actualSizeMB.toFixed(1)}MB`);
  return result;
  } catch (err) {
@@ -300,10 +428,16 @@ export class OnlineMusicApi {
 
     // 所有音质都是试听版 → 尝试跨源重试
     const crossSourceResult = await this._crossSourceRetry(id, songInfo);
-    if (crossSourceResult) return crossSourceResult;
+    if (crossSourceResult) {
+      this._setCachedUrl(cacheKey, crossSourceResult);
+      return crossSourceResult;
+    }
 
  // 最终回退：返回缓存中最后一个试听版链接
  if (lastTrialResult) {
+ if (!allowTrial) {
+ throw new Error(`所有音质均为试听版: ${songInfo.title || id} (${songInfo.source || "wy"})`);
+ }
  console.warn(`[OnlineMusicApi] ⚠️ 所有音质均为试听版，返回缓存结果: ${songInfo.source}/${id}`);
  return lastTrialResult;
  }
@@ -311,6 +445,9 @@ export class OnlineMusicApi {
  try {
  const lastResult = await this._getSongUrlSingle(id, songInfo, "128k");
  lastResult.isTrial = true;
+ if (!allowTrial) {
+ throw new Error(`仅获取到试听链接: ${songInfo.title || id} (${songInfo.source || "wy"})`);
+ }
  try {
  const trialCheck = await this._checkTrialUrl(lastResult.url, lastResult.headers);
  lastResult.actualSize = trialCheck.actualSize;
@@ -322,63 +459,98 @@ export class OnlineMusicApi {
     throw new Error(`无法获取播放链接: ${songInfo.title || id} (${songInfo.source || "wy"})`);
   }
 
+  _urlCacheKey(id, songInfo = {}, quality = "320k") {
+    return [
+      songInfo.source || "wy",
+      id || songInfo.id || songInfo.songmid || "",
+      songInfo.title || "",
+      songInfo.artist || "",
+      songInfo.hash || "",
+      songInfo.strMediaMid || "",
+      quality || "320k",
+    ].join("|");
+  }
+
+  _getCachedUrl(key) {
+    const cached = this.urlCache.get(key);
+    if (!cached) return null;
+    if (Date.now() - cached.cachedAt > this.urlCacheTtlMs) {
+      this.urlCache.delete(key);
+      return null;
+    }
+    return { ...cached.value };
+  }
+
+  _setCachedUrl(key, value) {
+    if (!value?.url) return;
+    this.urlCache.set(key, {
+      cachedAt: Date.now(),
+      value: { ...value },
+    });
+  }
+
   /**
    * 单次获取播放链接（不含试听检测）
    */
   async _getSongUrlSingle(id, songInfo = {}, quality = "320k") {
-    // 优先：LX Runtime 多源并发
-    if (this.lxRuntime && this.lxRuntime.plugins.length > 0) {
-      const info = {
-        id: String(id),
-        songmid: String(id),
-        source: songInfo.source || "wy",
-        title: songInfo.title || "",
-        hash: songInfo.hash || "",
-        albumId: songInfo.albumId || "",
-        strMediaMid: songInfo.strMediaMid || "",
-        ...songInfo,
-      };
-
-      try {
-        const result = await this.lxRuntime.getMusicUrl(info, quality);
-        console.log(`[OnlineMusicApi] ✅ LX Runtime 获取播放链接成功: ${info.source}/${id}`);
-        return result;
-      } catch (err) {
-        console.warn(`[OnlineMusicApi] LX Runtime 失败: ${err.message}，尝试直连回退...`);
-      }
+    if (!this.lxRuntime || this.lxRuntime.plugins.length === 0) {
+      throw new Error("尚未安装最新音源，请先在设置中执行“搜索最新音源”并成功加载后再播放");
     }
 
-    // 回退1：网易云直连（无特殊headers）
-    if (songInfo.source === "wy" || (!songInfo.source && this.provider === "wy")) {
-      try {
-        const url = await this._neteaseDirectUrl(id);
-        if (url) return { url, headers: {} };
-      } catch {}
-    }
+    const info = {
+      id: String(id),
+      songmid: String(id),
+      source: songInfo.source || "wy",
+      title: songInfo.title || "",
+      hash: songInfo.hash || "",
+      albumId: songInfo.albumId || "",
+      strMediaMid: songInfo.strMediaMid || "",
+      ...songInfo,
+    };
 
-    // 回退2：酷我直连（需要token/convert_api）
-    if (songInfo.source === "kw") {
-      try {
-        const url = await this._kuwoDirectUrl(id);
-        if (url) return { url, headers: {} };
-      } catch {}
-    }
-
-    // 回退3：酷狗直连
-    if (songInfo.source === "kg") {
-      try {
-        const url = await this._kugouDirectUrl(id, songInfo.hash);
-        if (url) return { url, headers: {} };
-      } catch {}
-    }
-
-    // 回退4：第三方代理
     try {
-      const url = await this._fallbackProxy(id, songInfo.source);
-      if (url) return { url, headers: {} };
-    } catch {}
+      const result = this._normalizeSongUrlResult(await this.lxRuntime.getMusicUrl(info, quality));
+      console.log(`[OnlineMusicApi] ✅ LX Runtime 获取播放链接成功: ${info.source}/${id}`);
+      return result;
+    } catch (err) {
+      throw new Error(`最新音源未能获取播放链接: ${err.message}`);
+    }
 
-    throw new Error(`无法获取播放链接: ${id} (${songInfo.source || "wy"}, ${quality})`);
+  }
+
+  _normalizeSongUrlResult(result = {}) {
+    if (!result?.url) return result;
+    return {
+      ...result,
+      headers: this._normalizeMediaHeaders(result.headers || {}, result.url),
+    };
+  }
+
+  _normalizeMediaHeaders(headers = {}, url = "") {
+    const normalized = {};
+    for (const [key, value] of Object.entries(headers || {})) {
+      if (value === undefined || value === null || value === "") continue;
+      normalized[key] = String(value);
+    }
+    const hasHeader = (name) => Object.keys(normalized).some((key) => key.toLowerCase() === name.toLowerCase());
+    if (!hasHeader("User-Agent")) {
+      normalized["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+    }
+    if (!hasHeader("Accept")) {
+      normalized.Accept = "*/*";
+    }
+    if (!hasHeader("Connection")) {
+      normalized.Connection = "keep-alive";
+    }
+    if (!hasHeader("Referer") && url) {
+      try {
+        const parsed = new URL(url);
+        if (/qq\.com|gtimg\.com|kuwo\.cn|kugou\.com|music\.163\.com|126\.net/i.test(parsed.hostname)) {
+          normalized.Referer = `${parsed.protocol}//${parsed.hostname}/`;
+        }
+      } catch {}
+    }
+    return normalized;
   }
 
   /**
@@ -391,14 +563,14 @@ export class OnlineMusicApi {
       const size = await this._headContentSize(url, headers);
       const sizeMB = size / 1024 / 1024;
       return {
-        isTrial: size > 0 && size < 300000, // < 300KB = 试听
+        isTrial: size > 0 && size < 1024 * 1024, // < 1MB usually means a short preview clip.
         actualSize: size,
         actualSizeMB: sizeMB,
       };
     } catch (err) {
       // HEAD 失败时无法判断，假设非试听
       console.warn(`[OnlineMusicApi] HEAD 检测失败: ${err.message}`);
-      return { isTrial: false, actualSize: -1, actualSizeMB: -1 };
+      return { isTrial: true, actualSize: -1, actualSizeMB: -1 };
     }
   }
 
@@ -452,7 +624,7 @@ export class OnlineMusicApi {
     console.log(`[OnlineMusicApi] 🔄 跨源重试: "${keyword}" 在 ${otherSources.join("/")}`);
 
     try {
-      const searchResults = await this.searchSdk.searchMulti(keyword, { limit: 5 });
+      const searchResults = MusicSearchSdk.toDisplayFormat(await this.searchSdk.searchMulti(keyword, { limit: 5 }));
       // 找同歌名不同源的版本
       const candidates = searchResults.filter(s =>
         String(s.id) !== String(id) &&
@@ -468,7 +640,7 @@ export class OnlineMusicApi {
             source: candidate.source,
           }, "320k");
           const trialCheck = await this._checkTrialUrl(result.url, result.headers);
-          if (!trialCheck.isTrial && trialCheck.actualSize > 300000) {
+          if (!trialCheck.isTrial && (trialCheck.actualSize < 0 || trialCheck.actualSize >= 1024 * 1024)) {
             result.isTrial = false;
             result.actualSize = trialCheck.actualSize;
             result.crossSource = candidate.source;

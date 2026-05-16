@@ -61,24 +61,17 @@ const startupPromise = (async () => {
  console.log("[Startup] 正在初始化...");
 
  try {
-   // 加载 LX 插件（用于获取播放链接）
-   const pluginResult = await sourceManager.loadLxPlugins();
-   if (pluginResult.loaded > 0) {
-     console.log(`[Startup] ✅ LX 插件加载成功: ${pluginResult.loaded} 个, 支持平台: ${sourceManager.getLxRuntime().getStatus().allSources.join(", ")}`);
-     // 同步 runtime 到 onlineApi
-     onlineApi.setLxRuntime(sourceManager.getLxRuntime());
-   } else {
-     console.log("[Startup] ⚠️ LX 插件加载失败，播放将回退到直连API");
-   }
+    console.log("[Startup] 跳过本地音源加载。请在设置中执行“搜索最新音源”后再在线播放。");
+    onlineApi.setLxRuntime(sourceManager.getLxRuntime());
 
    // 报告状态
    const runtimeStatus = sourceManager.getLxRuntime().getStatus();
    console.log(`[Startup] 🎵 搜索就绪: 网易云+酷我+酷狗 (内置 MusicSearchSdk)`);
    if (runtimeStatus.pluginCount > 0) {
      console.log(`[Startup] 🎵 播放就绪: ${runtimeStatus.pluginCount} 个插件, ${runtimeStatus.allSources.length} 个平台`);
-   } else {
-     console.log("[Startup] ⚠️ 无 LX 插件，播放将使用直连回退");
-   }
+    } else {
+      console.log("[Startup] ⚠️ 无 LX 插件，在线播放需先在设置中执行“搜索最新音源”");
+    }
  } catch (e) {
    console.warn("[Startup] 插件初始化失败:", e.message);
  }
@@ -372,7 +365,7 @@ app.get("/api/online/search", async (req, res) => {
     }
 
     const options = {};
-    if (source) options.source = source;
+    if (source && source !== "all" && source !== "multi") options.source = source;
     if (limit) options.limit = parseInt(limit) || 30;
     if (page) options.page = parseInt(page) || 1;
 
@@ -386,7 +379,12 @@ app.get("/api/online/search", async (req, res) => {
     res.json({
       success: true,
       results,
-      source: source || "multi",
+      source: options.source || "all",
+      providers: onlineApi.searchSdk.getProviders(),
+      searchEngine: "MusicSearchSdk",
+      latestSourceRequiredForPlayback: true,
+      latestSourceUsedForSearch: false,
+      verifiedByLatestSource: sourceManager.getLxRuntime().plugins.length > 0,
     });
   } catch (error) {
     res.json({ success: false, error: error.message });
@@ -419,16 +417,16 @@ app.get("/api/online/song", async (req, res) => {
 
 /**
  * 获取歌曲播放链接
- * 优先通过 LX 插件获取（多源并发），其次 fallback 到旧 API
+ * 通过 LX 音源插件获取播放链接（多插件并发），不走平台直连兜底
  */
 app.get("/api/online/url", async (req, res) => {
  try {
- const { id, source, quality, title, artist } = req.query;
+ const { id, source, quality, title, artist, hash, albumId, strMediaMid } = req.query;
  if (!id) {
  return res.status(400).json({ success: false, error: "Missing song id" });
  }
 
- const songInfo = { source: source || "wy", id: String(id), title: title || "", artist: artist || "" };
+ const songInfo = { source: source || "wy", id: String(id), songmid: String(id), title: title || "", artist: artist || "", hash: hash || "", albumId: albumId || "", strMediaMid: strMediaMid || "" };
  const result = await onlineApi.getSongUrl(id, songInfo, quality || "320k");
  // result = { url, headers, isTrial, actualSize, crossSource }
  res.json({
@@ -449,14 +447,14 @@ app.get("/api/online/url", async (req, res) => {
  */
 app.get("/api/online/play", async (req, res) => {
  try {
- const { id, url, source, title, artist } = req.query;
- // 优先使用直接传入的URL（搜索结果中已包含auth）
- let playUrl = url;
- let playHeaders = {};
- let isTrial = false;
- if (!playUrl && id) {
+  const { id, source, title, artist, hash, albumId, strMediaMid } = req.query;
+  // 播放必须通过 LX 音源插件解析真实媒体 URL，禁止直接传 url 绕过插件。
+  let playUrl = "";
+  let playHeaders = {};
+  let isTrial = false;
+  if (id) {
  try {
- const songInfo = { source: source || "wy", id: String(id), title: title || "", artist: artist || "" };
+ const songInfo = { source: source || "wy", id: String(id), songmid: String(id), title: title || "", artist: artist || "", hash: hash || "", albumId: albumId || "", strMediaMid: strMediaMid || "" };
  const result = await onlineApi.getSongUrl(id, songInfo);
  playUrl = result.url;
  playHeaders = result.headers || {};
@@ -484,13 +482,13 @@ app.get("/api/online/play", async (req, res) => {
  });
  }
  }
- if (!playUrl) {
- return res.status(400).json({
- success: false,
- error: "缺少歌曲ID或播放链接",
- detail: "请提供 id 或 url 参数"
- });
- }
+  if (!playUrl) {
+  return res.status(400).json({
+  success: false,
+  error: "缺少歌曲ID",
+  detail: "在线播放必须提供歌曲 id，并通过已安装的最新音源插件获取播放链接"
+  });
+  }
  try {
  await audioStreamer.playUrl(playUrl, { headers: playHeaders });
  } catch (playErr) {
@@ -498,6 +496,16 @@ app.get("/api/online/play", async (req, res) => {
  let detail = '';
  if (msg.includes('No ACK')) {
  detail = 'ESP32 播放设备未连接或无响应，请检查设备电源和网络连接';
+ return res.json({
+ success: true,
+ playbackStarted: false,
+ warning: "ESP32_NO_ACK",
+ message: "已获取非试听播放链接，但 ESP32 未响应，未能推送播放。",
+ detail,
+ url: playUrl,
+ headers: playHeaders,
+ isTrial,
+ });
  } else if (msg.includes('ffprobe') || msg.includes('Invalid data') || msg.includes('find format')) {
  detail = '音频格式不受支持或链接已失效，请尝试其他歌曲';
  } else if (msg.includes('ECONNREFUSED') || msg.includes('ENOTFOUND') || msg.includes('403') || msg.includes('404')) {
@@ -675,29 +683,7 @@ function broadcastLog(type, data) {
 // ── 优先级3：配置缓存兜底函数 ──
 // 从 source-config.json 加载上次成功的仓库，尝试加载 JS 插件
 async function _tryConfigCache(sendLog, sendEvent, clientClosed) {
- sourceManager._ensureConfigLoaded();
- const cachedRepos = sourceManager.config.discoveredRepos;
- if (!Array.isArray(cachedRepos) || cachedRepos.length === 0) {
- sendLog("③ 配置缓存中也没有已知仓库", "warn");
- return false;
- }
-
- sendLog(`③ 从配置缓存加载 ${cachedRepos.length} 个已知仓库...`);
- sendEvent("progress", { progress: 85 });
-
- sourceManager._pluginsLoaded = false;
- const lxResult = await sourceManager.loadLxPluginsFromRepos(cachedRepos, {
- onLog: (msg) => { if (!clientClosed) sendLog(msg); },
- });
-
- if (lxResult.loaded > 0) {
- const platforms = sourceManager.getLxRuntime().getStatus().allSources;
- sendLog(`✅ 配置缓存插件加载成功: ${lxResult.loaded} 个，支持: ${platforms.join(", ")}`, "success");
- sendEvent("done", { success: true, sourceCount: lxResult.loaded, platforms, plugins: lxResult.plugins });
- return true;
- }
-
- sendLog("③ 配置缓存的仓库也没有可用插件", "warn");
+ sendLog("已禁用本地/配置缓存兜底，本次必须从远程搜索到最新音源后才能加载。", "warn");
  return false;
 }
 
@@ -727,21 +713,23 @@ app.get("/api/source/fetch/stream", async (req, res) => {
  sendLog("🔄 开始刷新音源插件...");
 
  try {
- // 增量刷新：保留已有 runtime 和本地插件，只允许重新加载
- sourceManager._pluginsLoaded = false;
- // 不再重建 lxRuntime（避免丢失已有的 19 个本地音源插件）
- // loadLxPlugins 会增量加载 GitHub 插件 + 本地 sources/ 目录
- // 同步 runtime 引用（不变）
- onlineApi.lxRuntime = sourceManager.lxRuntime;
- downloader.setLxRuntime(sourceManager.lxRuntime);
+  // 最新音源是唯一可信来源：刷新时重建 runtime，不保留旧插件或本地兜底。
+  sourceManager.resetLxRuntime();
+  sourceManager.clearLocalInstalledSources((msg) => { if (!clientClosed) sendLog(msg); });
+  onlineApi.lxRuntime = sourceManager.lxRuntime;
+  downloader.setLxRuntime(sourceManager.lxRuntime);
 
  sendLog("① 通过 GitHub Search API 搜索最新音源仓库...");
  sendEvent("progress", { progress: 10 });
 
  // ── 优先级1：GitHub Search API + 加载 JS ──
- const result = await sourceManager.loadLxPlugins({
- onLog: (msg) => { if (!clientClosed) sendLog(msg); },
- });
+  const result = await sourceManager.loadLxPlugins({
+  includeLocal: false,
+  resetRuntime: false,
+  clearLocalOnSuccess: true,
+  useCache: false,
+  onLog: (msg) => { if (!clientClosed) sendLog(msg); },
+  });
 
  if (result.loaded > 0) {
  const platforms = sourceManager.getLxRuntime().getStatus().allSources;
@@ -758,10 +746,7 @@ app.get("/api/source/fetch/stream", async (req, res) => {
 
  try {
  const fetchResult = await sourceManager.startFetch("Jay Chou");
- if (fetchResult.pluginCount) {
- sendLog(`✅ LX 插件已加载 (${fetchResult.pluginCount} 个)`, "success");
- sendEvent("done", { success: true, sourceCount: fetchResult.pluginCount });
- } else if (fetchResult.taskId) {
+ if (fetchResult.taskId) {
  sendLog(`🤖 Hermes Agent 正在搜索音源... (${fetchResult.taskId})`);
  const maxWait = 5 * 60 * 1000;
  const interval = 5000;
@@ -774,10 +759,16 @@ app.get("/api/source/fetch/stream", async (req, res) => {
  // 仓库格式：Agent 返回的是仓库地址，需要加载插件
  if (progress._needsLxLoad && progress.repos?.length > 0) {
  sendLog(`✅ Agent 发现 ${progress.repos.length} 个仓库，正在加载插件...`, "success");
- sourceManager._pluginsLoaded = false;
- const lxResult = await sourceManager.loadLxPlugins({
- onLog: (msg) => { if (!clientClosed) sendLog(msg); },
- });
+  sourceManager._pluginsLoaded = false;
+  const lxResult = await sourceManager.loadLxPlugins({
+  includeLocal: false,
+  resetRuntime: false,
+  clearLocalOnSuccess: true,
+  useCache: false,
+  onLog: (msg) => { if (!clientClosed) sendLog(msg); },
+  });
+  onlineApi.lxRuntime = sourceManager.lxRuntime;
+  downloader.setLxRuntime(sourceManager.lxRuntime);
  if (lxResult.loaded > 0) {
  const platforms = sourceManager.getLxRuntime().getStatus().allSources;
  sendLog(`✅ Agent 插件加载成功: ${lxResult.loaded} 个，支持: ${platforms.join(", ")}`, "success");
@@ -814,7 +805,7 @@ app.get("/api/source/fetch/stream", async (req, res) => {
  }
  }
  } else {
- sendEvent("done", { success: true, ...fetchResult });
+ sendEvent("done", { success: false, error: fetchResult.message || "Hermes Agent 未返回可加载的远程音源仓库" });
  }
  } catch (agentErr) {
  // Agent 异常 → 尝试配置缓存
@@ -847,8 +838,14 @@ app.get("/api/source/fetch/stream", async (req, res) => {
 // 创建获取任务
 app.post("/api/source/task/create", async (req, res) => {
   try {
-    // 确保加载 LX 插件
-    const result = await sourceManager.loadLxPlugins();
+    const result = await sourceManager.loadLxPlugins({
+      includeLocal: false,
+      resetRuntime: true,
+      clearLocalOnSuccess: true,
+      useCache: false,
+    });
+    onlineApi.lxRuntime = sourceManager.lxRuntime;
+    downloader.setLxRuntime(sourceManager.lxRuntime);
     res.json({ success: true, taskId: `lx-${Date.now()}`, pluginResult: result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -858,7 +855,14 @@ app.post("/api/source/task/create", async (req, res) => {
 // 启动任务执行
 app.post("/api/source/task/:taskId/start", async (req, res) => {
   try {
-    const result = await sourceManager.loadLxPlugins();
+    const result = await sourceManager.loadLxPlugins({
+      includeLocal: false,
+      resetRuntime: true,
+      clearLocalOnSuccess: true,
+      useCache: false,
+    });
+    onlineApi.lxRuntime = sourceManager.lxRuntime;
+    downloader.setLxRuntime(sourceManager.lxRuntime);
     res.json({ success: true, result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -1036,13 +1040,14 @@ app.get("/api/lx/plugins", (req, res) => {
  */
 app.post("/api/lx/plugins/reload", async (req, res) => {
   try {
-    sourceManager._pluginsLoaded = false;
-    sourceManager.lxRuntime = new (await import("./lx-plugin-runtime.js")).LxPluginRuntime();
-    // 更新 onlineApi 和 downloader 的 runtime 引用
+    const result = await sourceManager.loadLxPlugins({
+      includeLocal: false,
+      resetRuntime: true,
+      clearLocalOnSuccess: true,
+      useCache: false,
+    });
     onlineApi.lxRuntime = sourceManager.lxRuntime;
     downloader.setLxRuntime(sourceManager.lxRuntime);
-
-    const result = await sourceManager.loadLxPlugins();
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

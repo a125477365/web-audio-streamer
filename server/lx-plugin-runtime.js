@@ -660,7 +660,7 @@ export class LxPluginRuntime {
 		if (preferred) {
 			console.log(`[LxRuntime] 优先使用插件: ${preferred.name}`);
 			try {
-				const result = await preferred.getMusicUrl(source, musicInfo, quality);
+				const result = this._normalizeMusicUrlResult(await preferred.getMusicUrl(source, musicInfo, quality));
 				return result; // { url, headers }
 			} catch (err) {
 				console.warn(`[LxRuntime] 优先插件 ${preferred.name} 失败: ${err.message}，回退到并发模式`);
@@ -694,7 +694,7 @@ export class LxPluginRuntime {
  // 并发获取+验证
  const attempts = compatiblePlugins.map(async (plugin) => {
  try {
- const result = await plugin.getMusicUrl(source, musicInfo, quality);
+  const result = this._normalizeMusicUrlResult(await plugin.getMusicUrl(source, musicInfo, quality));
  results.push({ plugin: plugin.name, result });
  return { plugin: plugin.name, result };
  } catch (err) {
@@ -720,7 +720,7 @@ export class LxPluginRuntime {
  if (v.ok) {
  const sizeMB = v.contentLength ? (v.contentLength / 1024 / 1024).toFixed(1) : '?';
  console.log(`[LxRuntime] ✅ 选中: ${plugin} | URL可达 | ${sizeMB}MB | ${new URL(url).hostname}`);
- return result; // { url, headers }
+  return this._normalizeMusicUrlResult(result); // { url, headers }
  } else {
  console.warn(`[LxRuntime] ⏭️ ${plugin} 返回的URL不可达: ${new URL(url).hostname}`);
  }
@@ -730,14 +730,49 @@ export class LxPluginRuntime {
  if (results.length > 0) {
  // 最后尝试：返回第一个结果，让前端自行处理
  console.warn(`[LxRuntime] ⚠️ 所有URL均不可达，返回第一个结果作为fallback`);
- return results[0].result;
+  return this._normalizeMusicUrlResult(results[0].result);
  }
 
- const errors = '所有音源均返回不可达的URL';
- throw new Error(`所有音源均无法获取播放链接: ${songInfo.title} (${errors})`);
- }
+  const errors = '所有音源均返回不可达的URL';
+  throw new Error(`所有音源均无法获取播放链接: ${songInfo.title} (${errors})`);
+  }
 
- /**
+  _normalizeMusicUrlResult(result = {}) {
+    if (!result?.url) return result;
+    return {
+      ...result,
+      headers: this._normalizeMediaHeaders(result.headers || {}, result.url),
+    };
+  }
+
+  _normalizeMediaHeaders(headers = {}, url = "") {
+    const normalized = {};
+    for (const [key, value] of Object.entries(headers || {})) {
+      if (value === undefined || value === null || value === "") continue;
+      normalized[key] = String(value);
+    }
+    const hasHeader = (name) => Object.keys(normalized).some((key) => key.toLowerCase() === name.toLowerCase());
+    if (!hasHeader("User-Agent")) {
+      normalized["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+    }
+    if (!hasHeader("Accept")) {
+      normalized.Accept = "*/*";
+    }
+    if (!hasHeader("Connection")) {
+      normalized.Connection = "keep-alive";
+    }
+    if (!hasHeader("Referer") && url) {
+      try {
+        const parsed = new URL(url);
+        if (/qq\.com|gtimg\.com|kuwo\.cn|kugou\.com|music\.163\.com|126\.net/i.test(parsed.hostname)) {
+          normalized.Referer = `${parsed.protocol}//${parsed.hostname}/`;
+        }
+      } catch {}
+    }
+    return normalized;
+  }
+
+  /**
  * 设置优先插件
  */
  setPreferredPlugin(pluginName) {

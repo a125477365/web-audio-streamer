@@ -12,6 +12,7 @@ import fs from "fs";
 import https from "https";
 import os from "os";
 import path from "path";
+import { fileURLToPath } from "url";
 import { LxPluginRuntime } from "./lx-plugin-runtime.js";
 
 const CONFIG_DIR = path.join(os.homedir(), ".openclaw", "web-audio-streamer");
@@ -26,7 +27,7 @@ export class SourceManager {
  this.lxRuntime = new LxPluginRuntime();
  this._pluginsLoaded = false;
  // 本地音源目录（项目 sources/ 子目录）
- this._localSourcesDir = path.join(path.dirname(import.meta.url.replace("file://", "")), "..", "sources");
+ this._localSourcesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "sources");
  }
 
   _ensureConfigDir() {
@@ -160,8 +161,40 @@ export class SourceManager {
   /**
    * 获取 LX Runtime 实例（供 OnlineMusicApi / Downloader 使用）
    */
-  getLxRuntime() {
+ getLxRuntime() {
     return this.lxRuntime;
+  }
+
+  resetLxRuntime() {
+    this.lxRuntime = new LxPluginRuntime();
+    this._pluginsLoaded = false;
+    return this.lxRuntime;
+  }
+
+  clearLocalInstalledSources(log = null) {
+    const writeLog = (msg) => {
+      console.log(`[SourceManager] ${msg}`);
+      if (log) log(msg);
+    };
+
+    const clearFiles = (dir, label) => {
+      const resolved = path.resolve(dir);
+      if (!fs.existsSync(resolved)) return 0;
+      let count = 0;
+      for (const entry of fs.readdirSync(resolved, { withFileTypes: true })) {
+        const target = path.join(resolved, entry.name);
+        if (entry.isFile()) {
+          fs.rmSync(target, { force: true });
+          count++;
+        }
+      }
+      writeLog(`已清理${label}: ${count} 个文件`);
+      return count;
+    };
+
+    const localCount = clearFiles(this._localSourcesDir, "本地 sources/ 音源");
+    const cacheCount = clearFiles(PLUGIN_CACHE_DIR, "旧音源缓存");
+    return { localCount, cacheCount };
   }
 
   // ==========================================================
@@ -176,7 +209,11 @@ export class SourceManager {
    * @returns {Promise<{loaded: number, failed: number, plugins: Array}>}
    */
  async loadLxPlugins(options = {}) {
- const { maxPlugins = 30, onLog = null } = options;
+ const { maxPlugins = 30, onLog = null, includeLocal = false, resetRuntime = false, clearLocalOnSuccess = false, useCache = false } = options;
+
+ if (resetRuntime) {
+ this.resetLxRuntime();
+ }
 
  if (this._pluginsLoaded) {
  return {
@@ -203,7 +240,7 @@ export class SourceManager {
  const allFailed = [];
 
  // ── 优先级0：先加载本地 sources/ 目录（保护已有本地插件不被覆盖）──
- const localDir = this._localSourcesDir || null;
+ const localDir = includeLocal ? (this._localSourcesDir || null) : null;
  if (localDir) {
  log(`📂 优先加载本地音源: ${localDir}`);
  try {
@@ -228,6 +265,8 @@ export class SourceManager {
  } catch (e) {
  log(`⚠️ 本地目录读取失败: ${e.message}`);
  }
+ } else if (!includeLocal) {
+ log("跳过本地 sources/ 目录，仅搜索远程最新音源...");
  }
 
  // ── 优先级1：GitHub Search API ──
@@ -258,7 +297,7 @@ export class SourceManager {
  for (const repo of repos) {
  try {
  if (onLog) log(`从 ${repo.owner}/${repo.repo} 加载插件...`);
- const plugins = await this._loadFromRepo(repo);
+  const plugins = await this._loadFromRepo(repo, { useCache });
  allLoaded.push(...plugins.loaded);
  allFailed.push(...plugins.failed);
  if (allLoaded.length >= maxPlugins) break;
@@ -290,7 +329,11 @@ export class SourceManager {
 
  // 更新配置
  this._ensureConfigLoaded();
- this.config.lxPlugins = allLoaded.map((p) => ({
+  if (clearLocalOnSuccess && allLoaded.length > 0) {
+  this.clearLocalInstalledSources(log);
+  }
+
+  this.config.lxPlugins = allLoaded.map((p) => ({
  name: p.name,
  version: p.version,
  sources: Object.keys(p.supportedSources),
@@ -318,7 +361,10 @@ export class SourceManager {
  /**
  * 从指定仓库列表加载 LX 插件（不搜索 GitHub，用于配置缓存兜底）
  */
- async loadLxPluginsFromRepos(repos, { onLog } = {}) {
+  async loadLxPluginsFromRepos(repos, { onLog, resetRuntime = false, useCache = false } = {}) {
+  if (resetRuntime) {
+  this.resetLxRuntime();
+  }
  const maxPlugins = this.maxPlugins || 20;
  const log = (msg) => {
  console.log(`[SourceManager] ${msg}`);
@@ -331,7 +377,7 @@ export class SourceManager {
  for (const repo of repos) {
  try {
  if (onLog) log(`从 ${repo.owner}/${repo.repo} 加载插件...`);
- const plugins = await this._loadFromRepo(repo);
+  const plugins = await this._loadFromRepo(repo, { useCache });
  allLoaded.push(...plugins.loaded);
  allFailed.push(...plugins.failed);
  if (allLoaded.length >= maxPlugins) break;
@@ -449,7 +495,8 @@ export class SourceManager {
  /**
  * 从单个 GitHub 仓库加载插件
  */
-  async _loadFromRepo(repo) {
+  async _loadFromRepo(repo, options = {}) {
+    const { useCache = false } = options;
     const { owner, repo: repoName, branch = "main", distPath = "" } = repo;
 
     // 获取 JS 文件列表
@@ -488,11 +535,11 @@ export class SourceManager {
       if (!downloadUrl) continue;
 
       try {
-        // 先检查缓存
+        // 仅在显式允许时读取缓存；搜索最新音源默认始终重新下载。
         const cachePath = path.join(PLUGIN_CACHE_DIR, `${owner}_${repoName}_${file.name}`);
         let code;
 
-        if (fs.existsSync(cachePath)) {
+        if (useCache && fs.existsSync(cachePath)) {
           const stat = fs.statSync(cachePath);
           // 缓存不超过 24 小时
           if (Date.now() - stat.mtimeMs < 24 * 60 * 60 * 1000) {
@@ -506,8 +553,9 @@ export class SourceManager {
   failed.push({ file: file.name, error: "下载失败" });
   continue;
   }
-  // 写入缓存
+  if (useCache) {
   fs.writeFileSync(cachePath, code, "utf-8");
+  }
   }
 
   // 预检查：必须是洛雪插件格式（含 @name/@description 注释），否则跳过
@@ -559,16 +607,7 @@ export class SourceManager {
   // ==========================================================
 
   async startFetch(testSong = "Jay Chou") {
-    // 如果已有 LX 插件在运行，不再需要 Hermes API 发现
-    if (this.lxRuntime.plugins.length > 0) {
-      return {
-        status: "success",
-        message: "LX 插件已加载，无需额外发现",
-        pluginCount: this.lxRuntime.plugins.length,
-      };
-    }
-
-    // 回退到 Hermes API
+    // 每次刷新都必须重新发现远程最新音源，不允许旧 runtime 插件短路成功。
     if (!this.hermesApi) {
       const { HermesSourceApi } = await import("./hermes-source-api.js");
       this.hermesApi = new HermesSourceApi();
@@ -650,7 +689,12 @@ export class SourceManager {
 
   async fetchSources(testSong = "Jay Chou") {
     // 优先尝试加载 LX 插件
-    const result = await this.loadLxPlugins();
+    const result = await this.loadLxPlugins({
+      includeLocal: false,
+      resetRuntime: true,
+      clearLocalOnSuccess: true,
+      useCache: false,
+    });
     if (result.loaded > 0) {
       return result.plugins.map((p) => ({
         name: p.name,
