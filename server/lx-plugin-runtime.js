@@ -673,15 +673,22 @@ export class LxPluginRuntime {
  const urlValidateTimeout = 5000; // URL验证超时5秒
 
  // 快速验证URL可达性（HEAD请求，只检查能否连接）
- const validateUrl = async (url, headers = {}) => {
- try {
- const urlObj = new URL(url);
- const mod = urlObj.protocol === 'https:' ? await import('node:https') : await import('node:http');
- return new Promise((resolve) => {
- const req = mod.request(urlObj, { method: 'HEAD', timeout: urlValidateTimeout }, (res) => {
- const cl = parseInt(res.headers['content-length'] || '0', 10);
- resolve({ ok: true, contentLength: cl, statusCode: res.statusCode });
- });
+  const validateUrl = async (url, headers = {}) => {
+  try {
+  const urlObj = new URL(url);
+  const mod = urlObj.protocol === 'https:' ? await import('node:https') : await import('node:http');
+  return new Promise((resolve) => {
+  const req = mod.request(urlObj, {
+    method: 'HEAD',
+    timeout: urlValidateTimeout,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      ...headers,
+    },
+  }, (res) => {
+  const cl = parseInt(res.headers['content-length'] || '0', 10);
+  resolve({ ok: true, contentLength: cl, statusCode: res.statusCode });
+  });
  req.on('error', () => resolve({ ok: false }));
  req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
  req.end();

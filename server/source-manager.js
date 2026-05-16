@@ -361,7 +361,7 @@ export class SourceManager {
  /**
  * 从指定仓库列表加载 LX 插件（不搜索 GitHub，用于配置缓存兜底）
  */
-  async loadLxPluginsFromRepos(repos, { onLog, resetRuntime = false, useCache = false } = {}) {
+  async loadLxPluginsFromRepos(repos, { onLog, resetRuntime = false, useCache = false, clearLocalOnSuccess = false } = {}) {
   if (resetRuntime) {
   this.resetLxRuntime();
   }
@@ -385,6 +385,10 @@ export class SourceManager {
  log(`仓库 ${repo.owner}/${repo.repo} 加载失败: ${err.message}`);
  allFailed.push({ repo: `${repo.owner}/${repo.repo}`, error: err.message });
  }
+ }
+
+ if (clearLocalOnSuccess && allLoaded.length > 0) {
+ this.clearLocalInstalledSources(log);
  }
 
  // 更新配置

@@ -244,10 +244,11 @@ export class OnlineMusicApi {
           }));
       }
 
+      const parsedLimit = Number.parseInt(options.limit, 10) || 30;
       return await this._filterPlayableFullResults(candidates, {
-        limit: Number.parseInt(options.limit, 10) || 30,
-        verifyLimit: Number.parseInt(options.verifyLimit, 10) || Math.max((Number.parseInt(options.limit, 10) || 30) * 3, 60),
-        concurrency: Number.parseInt(options.verifyConcurrency, 10) || 6,
+        limit: parsedLimit,
+        verifyLimit: Number.parseInt(options.verifyLimit, 10) || Math.max(parsedLimit * 2, 24),
+        concurrency: Number.parseInt(options.verifyConcurrency, 10) || 8,
       });
     } catch (error) {
       console.error("[OnlineMusicApi] 搜索失败:", error.message);
@@ -308,6 +309,17 @@ export class OnlineMusicApi {
     return this._bestDeclaredSize(song);
   }
 
+  _desiredVerifyQuality(song = {}) {
+    const best = this._bestQualityRank(song);
+    if (best >= 4) return "flac";
+    if (best >= 3) return "320k";
+    return "128k";
+  }
+
+  _isStrongCandidate(song = {}) {
+    return this._bestQualityRank(song) >= 4 && this._verifiedSize(song) > 0;
+  }
+
   _sortPlayableResults(results = []) {
     return [...results].sort((a, b) => {
       const aLossless = this._bestQualityRank(a) >= 4 ? 1 : 0;
@@ -342,29 +354,42 @@ export class OnlineMusicApi {
       .filter((song) => song && song.id && song.title && song.artist && song.source)
       .slice(0, verifyLimit);
     const accepted = [];
-    let cursor = 0;
+    const batchSize = Math.max(limit, 12);
 
-    const worker = async () => {
-      while (cursor < candidates.length) {
-        const song = candidates[cursor++];
-        try {
-          const result = await this.getSongUrl(song.id, song, "320k", { allowTrial: false });
-          if (!result?.url || result.isTrial) continue;
-          accepted.push({
-            ...song,
-            playable: true,
-            isTrial: false,
-            actualSize: result.actualSize || this._bestDeclaredSize(song) || -1,
-            resolvedQuality: result.quality || "",
-            crossSource: result.crossSource || null,
-          });
-        } catch (err) {
-          console.warn(`[OnlineMusicApi] 跳过不可播放/试听结果: ${song.source}/${song.id} ${song.title} - ${err.message}`);
+    const verifyBatch = async (batch) => {
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < batch.length) {
+          const song = batch[cursor++];
+          try {
+            const quality = this._desiredVerifyQuality(song);
+            const result = await this.getSongUrl(song.id, song, quality, { allowTrial: false });
+            if (!result?.url || result.isTrial) continue;
+            accepted.push({
+              ...song,
+              playable: true,
+              isTrial: false,
+              actualSize: result.actualSize || this._bestDeclaredSize(song) || -1,
+              resolvedQuality: result.quality || quality,
+              crossSource: result.crossSource || null,
+            });
+          } catch (err) {
+            console.warn(`[OnlineMusicApi] 跳过不可播放/试听结果: ${song.source}/${song.id} ${song.title} - ${err.message}`);
+          }
         }
-      }
+      };
+      await Promise.all(Array.from({ length: Math.min(concurrency, batch.length || 1) }, () => worker()));
     };
 
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    for (let offset = 0; offset < candidates.length; offset += batchSize) {
+      await verifyBatch(candidates.slice(offset, offset + batchSize));
+      const topResults = this._sortPlayableResults(accepted).slice(0, limit);
+      const strongCount = topResults.filter((song) => this._isStrongCandidate(song)).length;
+      if (topResults.length >= limit && (strongCount >= Math.min(3, limit) || offset + batchSize >= candidates.length)) {
+        break;
+      }
+    }
+
     return this._sortPlayableResults(accepted)
       .slice(0, limit)
       .map(({ _rankIndex, ...song }) => song);

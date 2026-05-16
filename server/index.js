@@ -56,21 +56,80 @@ const downloader = new MusicDownloader(config, sourceManager.getLxRuntime());
 const recommender = new RecommendationEngine(config);
 const smartSourceFinder = new SmartSourceFinder(config);
 
-// Startup: 加载 LX 插件（仅用于获取播放链接，搜索由内置 MusicSearchSdk 实现）
+async function refreshLatestSourcePlugins({ log = console.log, maxAgentWaitMs = 120000, agentIntervalMs = 5000 } = {}) {
+  const writeLog = (msg) => log(`[StartupSource] ${msg}`);
+
+  sourceManager.resetLxRuntime();
+  sourceManager.clearLocalInstalledSources(writeLog);
+  onlineApi.setLxRuntime(sourceManager.getLxRuntime());
+  downloader.setLxRuntime(sourceManager.getLxRuntime());
+
+  const result = await sourceManager.loadLxPlugins({
+    includeLocal: false,
+    resetRuntime: false,
+    clearLocalOnSuccess: true,
+    useCache: false,
+    onLog: writeLog,
+  });
+
+  if (result.loaded > 0) {
+    onlineApi.setLxRuntime(sourceManager.getLxRuntime());
+    downloader.setLxRuntime(sourceManager.getLxRuntime());
+    return result;
+  }
+
+  if (!sourceManager._needAgentSearch) return result;
+
+  writeLog("GitHub 音源不可用，启动 Hermes Agent 搜索最新音源...");
+  const fetchResult = await sourceManager.startFetch("Jay Chou");
+  if (!fetchResult?.taskId) {
+    return { loaded: 0, failed: result.failed || 0, plugins: [], errors: result.errors || [] };
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxAgentWaitMs) {
+    await new Promise((resolve) => setTimeout(resolve, agentIntervalMs));
+    const progress = sourceManager.checkFetchProgress();
+    if (progress.status === "success" && progress.sources?.length > 0) {
+      if (progress._needsLxLoad && progress.repos?.length > 0) {
+        writeLog(`Hermes Agent 找到 ${progress.repos.length} 个仓库，正在加载插件...`);
+        const lxResult = await sourceManager.loadLxPluginsFromRepos(progress.repos, {
+          resetRuntime: false,
+          clearLocalOnSuccess: true,
+          useCache: false,
+          onLog: writeLog,
+        });
+        onlineApi.setLxRuntime(sourceManager.getLxRuntime());
+        downloader.setLxRuntime(sourceManager.getLxRuntime());
+        return lxResult;
+      }
+      writeLog("Hermes Agent 返回的不是 LX 插件仓库，无法用于播放解析");
+      return { loaded: 0, failed: result.failed || 0, plugins: [], errors: result.errors || [] };
+    }
+    if (progress.status === "error") {
+      throw new Error(progress.message || "Hermes Agent 搜索失败");
+    }
+  }
+
+  writeLog("Hermes Agent 搜索超时，启动后仍可在设置页手动搜索最新音源");
+  return { loaded: 0, failed: result.failed || 0, plugins: [], errors: result.errors || [] };
+}
+
+// Startup: 自动刷新最新 LX 音源插件（仅用于获取播放链接，搜索由内置 MusicSearchSdk 实现）
 const startupPromise = (async () => {
  console.log("[Startup] 正在初始化...");
 
  try {
-    console.log("[Startup] 跳过本地音源加载。请在设置中执行“搜索最新音源”后再在线播放。");
-    onlineApi.setLxRuntime(sourceManager.getLxRuntime());
+    console.log("[Startup] 自动搜索并加载最新远程音源...");
+    const pluginResult = await refreshLatestSourcePlugins();
 
    // 报告状态
-   const runtimeStatus = sourceManager.getLxRuntime().getStatus();
-   console.log(`[Startup] 🎵 搜索就绪: 网易云+酷我+酷狗 (内置 MusicSearchSdk)`);
-   if (runtimeStatus.pluginCount > 0) {
-     console.log(`[Startup] 🎵 播放就绪: ${runtimeStatus.pluginCount} 个插件, ${runtimeStatus.allSources.length} 个平台`);
-    } else {
-      console.log("[Startup] ⚠️ 无 LX 插件，在线播放需先在设置中执行“搜索最新音源”");
+    const runtimeStatus = sourceManager.getLxRuntime().getStatus();
+    console.log(`[Startup] 🎵 搜索就绪: 网易云+酷我+酷狗 (内置 MusicSearchSdk)`);
+    if (runtimeStatus.pluginCount > 0) {
+      console.log(`[Startup] 🎵 播放就绪: ${runtimeStatus.pluginCount} 个插件, ${runtimeStatus.allSources.length} 个平台`);
+     } else {
+      console.log(`[Startup] ⚠️ 自动搜索未加载到可用 LX 插件，失败数: ${pluginResult.failed || 0}`);
     }
  } catch (e) {
    console.warn("[Startup] 插件初始化失败:", e.message);
@@ -759,14 +818,13 @@ app.get("/api/source/fetch/stream", async (req, res) => {
  // 仓库格式：Agent 返回的是仓库地址，需要加载插件
  if (progress._needsLxLoad && progress.repos?.length > 0) {
  sendLog(`✅ Agent 发现 ${progress.repos.length} 个仓库，正在加载插件...`, "success");
-  sourceManager._pluginsLoaded = false;
-  const lxResult = await sourceManager.loadLxPlugins({
-  includeLocal: false,
-  resetRuntime: false,
-  clearLocalOnSuccess: true,
-  useCache: false,
-  onLog: (msg) => { if (!clientClosed) sendLog(msg); },
-  });
+   sourceManager._pluginsLoaded = false;
+   const lxResult = await sourceManager.loadLxPluginsFromRepos(progress.repos, {
+   resetRuntime: false,
+   clearLocalOnSuccess: true,
+   useCache: false,
+   onLog: (msg) => { if (!clientClosed) sendLog(msg); },
+   });
   onlineApi.lxRuntime = sourceManager.lxRuntime;
   downloader.setLxRuntime(sourceManager.lxRuntime);
  if (lxResult.loaded > 0) {
