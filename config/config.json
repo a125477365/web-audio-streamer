@@ -4,12 +4,12 @@
     "host": "0.0.0.0"
   },
   "esp32": {
-    "host": "192.168.6.93",
+    "host": "172.20.10.2",
     "port": 8000
   },
   "audio": {
-    "sampleRate": 192000,
-    "bitsPerSample": 32,
+    "sampleRate": 44100,
+    "bitsPerSample": 16,
     "channels": 2,
     "bufferMs": 10
   },
@@ -24,7 +24,7 @@
       ".m4a",
       ".ape"
     ],
-    "lastBrowse": "/home/node/.openclaw/workspace/web-audio-streamer/music"
+    "lastBrowse": ""
   },
   "online": {
     "provider": "netease",

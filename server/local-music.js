@@ -4,7 +4,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
+import { FFPROBE_PATH } from './ffmpeg-paths.js';
 
 export class LocalMusicScanner {
  constructor(config) {
@@ -134,8 +135,7 @@ export class LocalMusicScanner {
  */
  _quickProbe(filePath) {
  try {
- const cmd = `ffprobe -v quiet -print_format json -show_format -show_streams "${filePath.replace(/"/g, '\\"')}" 2>/dev/null`;
- const stdout = execSync(cmd, { timeout: 3000, encoding: 'utf-8' });
+ const stdout = execFileSync(FFPROBE_PATH, ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath], { timeout: 3000, encoding: 'utf-8' });
  const data = JSON.parse(stdout);
  const stream = (data.streams || []).find(s => s.codec_type === 'audio') || {};
  const format = data.format || {};

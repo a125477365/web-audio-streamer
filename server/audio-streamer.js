@@ -2,15 +2,19 @@
  * Audio Streamer - Bit-Perfect 架构
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
 import dgram from 'dgram';
 import fs from 'fs';
 import { EventEmitter } from 'events';
+import { FFMPEG_PATH, FFPROBE_PATH } from './ffmpeg-paths.js';
 
 const CONTROL_MAGIC = Buffer.from([0xAA, 0x55]);
 const DEFAULT_SAMPLE_RATE = 44100;
 const DEFAULT_CHANNELS = 2;
 const DEFAULT_BITS_PER_SAMPLE = 16;
+// 单个 UDP 数据报上限：低于以太网/WiFi MTU(1500-IP/UDP头)，避免 IP 分片，
+// 也保证不超过 ESP32 固件 2048 字节的接收缓冲
+const MAX_DATAGRAM_BYTES = 1400;
 
 function formatTime(seconds) {
 	const mins = Math.floor(seconds / 60);
@@ -47,6 +51,7 @@ class UDPControlChannel {
 		this.socket = null;
 		this.seqCounter = 0;
 		this.pendingAcks = new Map();
+		this.onBufLevel = null; // ESP32 缓冲水位上报回调（闭环流控）
 	}
 
 	init() {
@@ -55,13 +60,16 @@ class UDPControlChannel {
 		this.socket.bind(0);
 		this.socket.on('message', (msg) => {
 			const parsed = parseControlPacket(msg);
-			if (parsed && parsed.payload && parsed.payload.cmd === 'ack') {
+			if (!parsed || !parsed.payload) return;
+			if (parsed.payload.cmd === 'ack') {
 				const pending = this.pendingAcks.get(parsed.seq);
 				if (pending) {
 					clearTimeout(pending.timeout);
 					this.pendingAcks.delete(parsed.seq);
 					pending.resolve(parsed.payload);
 				}
+			} else if (parsed.payload.cmd === 'bufLevel') {
+				if (this.onBufLevel) this.onBufLevel(parsed.payload);
 			}
 		});
 	}
@@ -141,7 +149,7 @@ class FFmpegDecoder extends EventEmitter {
 	}
 
 	decode(filePath, options, onData) {
-		const { sampleRate, channels, bitsPerSample, seekTime = 0, volume = 100, headers = {} } = options;
+		const { sampleRate, channels, bitsPerSample, seekTime = 0, headers = {} } = options;
 		const currentId = ++this.currentId;
 		this.stop();
 
@@ -150,9 +158,9 @@ class FFmpegDecoder extends EventEmitter {
 		const codecMap = { 16: 'pcm_s16le', 24: 'pcm_s24le', 32: 'pcm_s32le' };
 		const codec = codecMap[bitsPerSample] || 'pcm_s16le';
 
-		const ffmpegArgs = [
-			'-re',
-		];
+		// 不用 -re：解码全速进行，由 AudioSender 按 ESP32 反馈的缓冲水位
+		// 闭环控速（丢包自动补偿），stdout 背压限制内存占用
+		const ffmpegArgs = [];
 
 		// 注入 -headers（用于 CDN 防盗链，如 Referer/User-Agent）
 		const headerEntries = Object.entries(headers);
@@ -172,13 +180,11 @@ class FFmpegDecoder extends EventEmitter {
 			'-acodec', codec,
 		);
 
-		if (volume !== 100) {
-			ffmpegArgs.push('-af', `volume=${volume / 100}`);
-		}
+		// 注意：音量不在解码端处理，由 ESP32 端统一缩放（避免双重衰减）
 
 		ffmpegArgs.push('-');
 
-		const proc = spawn('ffmpeg', ffmpegArgs, {
+		const proc = spawn(FFMPEG_PATH, ffmpegArgs, {
 			stdio: ['ignore', 'pipe', 'pipe']
 		});
 		this.process = proc;
@@ -187,9 +193,18 @@ class FFmpegDecoder extends EventEmitter {
 			proc.stdout.on('data', (data) => {
 				if (this.currentId === currentId) {
 					onData(data);
+					// 背压：下游缓冲已满时暂停解码输出
+					if (this.flowIsFull && this.flowIsFull()) {
+						proc.stdout.pause();
+					}
 				}
 			});
 		}
+		this.resumeFlow = () => {
+			if (this.process === proc) {
+				try { proc.stdout.resume(); } catch (e) {}
+			}
+		};
 
 		proc.on('error', (err) => {
 			console.error(`[Decoder#${currentId}] Error:`, err.message);
@@ -223,6 +238,15 @@ class AudioSender {
 		this.chunkSize = 0;
 		this.bytesSent = 0;
 		this.isRunning = false;
+		// 闭环流控状态
+		this.espBufLevel = -1;     // ESP32 上报的环形缓冲水位 (0~1)
+		this.espBufAt = 0;         // 上报时间戳
+		this.highWater = 0;        // 解码背压上限（字节）
+		this.lowWater = 0;
+		this.onDrain = null;       // 缓冲降至低水位时恢复解码
+		this.onEmpty = null;       // 解码结束且缓冲清空时通知播放结束
+		this.decodeDone = false;
+		this._emptyFired = false;
 	}
 
 	start(sampleRate, channels, bitsPerSample) {
@@ -231,8 +255,19 @@ class AudioSender {
 		const bytesPerSample = bitsPerSample / 8;
 		const samplesPerChunk = Math.floor(sampleRate * chunkDurationMs / 1000);
 		this.chunkSize = samplesPerChunk * channels * bytesPerSample;
+		const bytesPerSecond = sampleRate * channels * bytesPerSample;
+		// 背压水位：内存中最多缓 5 秒解码数据
+		this.highWater = bytesPerSecond * 5;
+		this.lowWater = bytesPerSecond * 2;
+		// UDP 数据报大小：≤1400 且按采样帧对齐，丢包时不破坏帧边界
+		const frameBytes = channels * bytesPerSample;
+		this.datagramSize = Math.max(frameBytes, Math.floor(MAX_DATAGRAM_BYTES / frameBytes) * frameBytes);
 		this.buffer = Buffer.alloc(0);
 		this.bytesSent = 0;
+		this.espBufLevel = -1;
+		this.espBufAt = 0;
+		this.decodeDone = false;
+		this._emptyFired = false;
 		this.isRunning = true;
 		this.sendInterval = setInterval(() => {
 			this._sendChunks();
@@ -244,6 +279,15 @@ class AudioSender {
 		this.buffer = Buffer.concat([this.buffer, data]);
 	}
 
+	isFull() {
+		return this.buffer.length >= this.highWater;
+	}
+
+	updateEspLevel(level) {
+		this.espBufLevel = level;
+		this.espBufAt = Date.now();
+	}
+
 	stop() {
 		if (this.sendInterval) {
 			clearInterval(this.sendInterval);
@@ -251,21 +295,62 @@ class AudioSender {
 		}
 		this.isRunning = false;
 		this.buffer = Buffer.alloc(0);
+		this.decodeDone = false;
+		this._emptyFired = false;
 	}
 
 	_sendChunks() {
 		if (!this.isRunning) return;
-		const prefillChunks = 4;
-		while (this.bytesSent < prefillChunks * this.chunkSize && this.buffer.length >= this.chunkSize) {
-			const chunk = this.buffer.subarray(0, this.chunkSize);
-			this.buffer = this.buffer.subarray(this.chunkSize);
-			this.controlChannel.sendAudio(chunk);
-			this.bytesSent += this.chunkSize;
+
+		// 闭环速率控制（P 控制，目标水位 0.6）：
+		// rate = 1 + 2*(0.6 - level)，范围 [0, 2] 倍实时速率。
+		// 目标定在 ESP32 起播阈值(0.5)之上，预留 ~250ms 的丢包突发余量；
+		// 水位低 → 加速补偿 WiFi 丢包；水位高 → 减速防溢出。
+		// 起播尚无水位反馈时按 2 倍速预填充；反馈中断超 3s 回落到 1 倍速。
+		let rate;
+		if (this.espBufAt === 0) {
+			rate = 2; // 预填充阶段
+		} else if (Date.now() - this.espBufAt < 3000) {
+			const err = 0.6 - this.espBufLevel;
+			rate = 1 + Math.max(-1, Math.min(1, err * 2));
+		} else {
+			rate = 1; // 反馈中断，保持实时速率
 		}
-		while (this.buffer.length >= this.chunkSize) {
+
+		this._budget = Math.min((this._budget || 0) + rate, 3);
+		let sentThisTick = 0;
+		while (this.buffer.length >= this.chunkSize && this._budget >= 1 && sentThisTick < 3) {
 			const chunk = this.buffer.subarray(0, this.chunkSize);
 			this.buffer = this.buffer.subarray(this.chunkSize);
-			this.controlChannel.sendAudio(chunk);
+			// 拆分为 MTU 安全的数据报发送，避免 IP 分片和 ESP32 接收缓冲截断
+			for (let off = 0; off < chunk.length; off += this.datagramSize) {
+				const end = Math.min(off + this.datagramSize, chunk.length);
+				this.controlChannel.sendAudio(chunk.subarray(off, end));
+			}
+			this.bytesSent += this.chunkSize;
+			this._budget -= 1;
+			sentThisTick++;
+		}
+
+		// 解码结束后的尾部数据（不足一个 chunk）直接发出
+		if (this.decodeDone && this.buffer.length > 0 && this.buffer.length < this.chunkSize) {
+			for (let off = 0; off < this.buffer.length; off += this.datagramSize) {
+				const end = Math.min(off + this.datagramSize, this.buffer.length);
+				this.controlChannel.sendAudio(this.buffer.subarray(off, end));
+			}
+			this.bytesSent += this.buffer.length;
+			this.buffer = Buffer.alloc(0);
+		}
+
+		// 背压恢复：缓冲降到低水位以下，让解码器继续吐数据
+		if (this.buffer.length < this.lowWater && this.onDrain) {
+			this.onDrain();
+		}
+
+		// 播放结束检测：解码完成且发送缓冲已空（ESP32 端还有 ~200ms 余量播完）
+		if (this.decodeDone && this.buffer.length === 0 && !this._emptyFired) {
+			this._emptyFired = true;
+			if (this.onEmpty) this.onEmpty();
 		}
 	}
 }
@@ -289,13 +374,34 @@ export class AudioStreamer {
 		this.statusCallbacks = [];
 		this.connectionStatus = { esp32Connecting: false, esp32RetryAttempt: 0, esp32RetryMax: 0, esp32Failed: false };
 		this._setupDecoderEvents();
+		this._setupFlowControl();
+	}
+
+	_setupFlowControl() {
+		// ESP32 水位上报 → 发送端闭环调速
+		this.controlChannel.onBufLevel = (p) => {
+			if (typeof p.level === 'number') this.sender.updateEspLevel(p.level);
+		};
+		// 解码背压：发送缓冲满则暂停 ffmpeg stdout，降到低水位恢复
+		this.decoder.flowIsFull = () => this.sender.isFull();
+		this.sender.onDrain = () => { if (this.decoder.resumeFlow) this.decoder.resumeFlow(); };
+		// 发送缓冲清空 + 解码结束 → 等 ESP32 播完环形缓冲余量再收尾
+		this.sender.onEmpty = () => {
+			setTimeout(() => {
+				if (this.state === 'playing' && this.sender.decodeDone) {
+					this._onPlaybackEnd();
+				}
+			}, 600);
+		};
 	}
 
 	_setupDecoderEvents() {
 		this.decoder.on('close', ({ id, code }) => {
 			console.log(`[AudioStreamer] Decoder closed (id=${id}, code=${code})`);
 			if (this.state === 'playing') {
-				this._onPlaybackEnd();
+				// 解码结束 ≠ 播放结束：发送缓冲可能还有数秒数据，
+				// 标记后由 sender.onEmpty 触发真正的收尾
+				this.sender.decodeDone = true;
 			}
 		});
 
@@ -311,7 +417,7 @@ export class AudioStreamer {
 
 		console.log(`[AudioStreamer] playLocalFile: ${filePath}, seek=${seekTime}s`);
 
-		const probe = this._probeAudio(filePath);
+		const probe = this._normalizeFormat(this._probeAudio(filePath));
 		const { sampleRate, channels, bitsPerSample, duration } = probe;
 
 		const needReconfig = sampleRate !== this.currentSampleRate ||
@@ -347,7 +453,7 @@ export class AudioStreamer {
 
 		this.sender.start(sampleRate, channels, bitsPerSample);
 		this.decoder.decode(filePath, {
-			sampleRate, channels, bitsPerSample, seekTime, volume: this.volume
+			sampleRate, channels, bitsPerSample, seekTime
 		}, (data) => {
 			this.sender.feed(data);
 		});
@@ -369,7 +475,7 @@ export class AudioStreamer {
 		const { headers = {}, seekTime = 0 } = typeof options === 'number' ? { seekTime: options } : options;
 		console.log(`[AudioStreamer] playUrl: ${url}`, Object.keys(headers).length > 0 ? `(headers: ${Object.keys(headers).join(',')})` : '');
 
-		const probe = this._probeAudio(url, headers);
+		const probe = this._normalizeFormat(this._probeAudio(url, headers));
 		const { sampleRate, channels, bitsPerSample, duration } = probe;
 
 		const needReconfig = sampleRate !== this.currentSampleRate ||
@@ -405,7 +511,7 @@ export class AudioStreamer {
 
 		this.sender.start(sampleRate, channels, bitsPerSample);
 		this.decoder.decode(url, {
-			sampleRate, channels, bitsPerSample, seekTime, volume: this.volume, headers
+			sampleRate, channels, bitsPerSample, seekTime, headers
 		}, (data) => {
 			this.sender.feed(data);
 		});
@@ -537,17 +643,17 @@ export class AudioStreamer {
 
 	_probeAudio(input, headers = {}) {
 		try {
-			// 构建 ffprobe 命令，注入 -headers（用于 CDN 防盗链）
-			let headerArg = '';
+			// 使用参数数组调用 ffprobe，避免 shell 引号/注入问题
+			const args = ['-v', 'quiet', '-print_format', 'json', '-show_streams', '-show_format'];
 			const headerEntries = Object.entries(headers);
 			if (headerEntries.length > 0 && input.startsWith('http')) {
 				const headerStr = headerEntries
 					.map(([k, v]) => `${k}: ${v}`)
 					.join('\r\n');
-				headerArg = `-headers "${headerStr.replace(/"/g, '\\"')}"`;
+				args.push('-headers', headerStr);
 			}
-			const cmd = `ffprobe ${headerArg} -v quiet -print_format json -show_streams -show_format "${input}"`;
-			const result = execSync(cmd, { timeout: 10000, encoding: 'utf-8', shell: true });
+			args.push(input);
+			const result = execFileSync(FFPROBE_PATH, args, { timeout: 10000, encoding: 'utf-8' });
 			const info = JSON.parse(result);
 
 			let duration = 0;
@@ -577,6 +683,28 @@ export class AudioStreamer {
 		};
 	}
 
+	/**
+	 * 频率/位深协调：把任意源格式映射为 ESP32 可稳定播放的格式
+	 * - 位深：≤16bit → 16bit；24/32bit → 32bit 容器（24bit 无损升位，ESP32 I2S 对 16/32bit 支持最稳）
+	 * - 采样率：>48kHz 按整数比降频（88.2/176.4k→44.1k，96/192k→48k），
+	 *   控制 WiFi UDP 带宽并保证 ESP32 实时处理
+	 * - 声道：>2 声道混缩为立体声
+	 */
+	_normalizeFormat(probe) {
+		const out = { ...probe };
+		out.bitsPerSample = (probe.bitsPerSample || DEFAULT_BITS_PER_SAMPLE) <= 16 ? 16 : 32;
+		let rate = probe.sampleRate || DEFAULT_SAMPLE_RATE;
+		if (rate > 48000) {
+			rate = (rate % 44100 === 0) ? 44100 : 48000;
+		}
+		out.sampleRate = rate;
+		out.channels = Math.min(probe.channels || DEFAULT_CHANNELS, 2) || DEFAULT_CHANNELS;
+		if (out.sampleRate !== probe.sampleRate || out.bitsPerSample !== probe.bitsPerSample || out.channels !== probe.channels) {
+			console.log(`[AudioStreamer] 格式协调: ${probe.sampleRate}Hz/${probe.bitsPerSample}bit/${probe.channels}ch → ${out.sampleRate}Hz/${out.bitsPerSample}bit/${out.channels}ch`);
+		}
+		return out;
+	}
+
 	async _notifyEsp32Config(sampleRate, bitsPerSample, channels) {
 		console.log(`[AudioStreamer] Notifying ESP32: ${sampleRate}Hz / ${bitsPerSample}bit / ${channels}ch`);
 		try {
@@ -588,6 +716,9 @@ export class AudioStreamer {
 					this._updateStatus(this.connectionStatus);
 				}
 			);
+			if (ack?.status && ack.status !== 'ok') {
+				throw new Error(`ESP32 rejected audio config (status=${ack.status})`);
+			}
 			this.connectionStatus = { esp32Connecting: false, esp32RetryAttempt: 0, esp32RetryMax: 0, esp32Failed: false };
 			this._updateStatus(this.connectionStatus);
 			console.log(`[AudioStreamer] ESP32 confirmed:`, ack?.status);

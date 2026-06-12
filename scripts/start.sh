@@ -51,15 +51,19 @@ check_node_deps() {
     fi
 }
 
-# 检查并安装 FFmpeg
+# 检查 FFmpeg：优先系统安装，缺失则依赖 npm 的 ffmpeg-static/ffprobe-static 兜底
 check_ffmpeg() {
     if command -v ffmpeg &> /dev/null; then
         FFMPEG_VERSION=$(ffmpeg -version 2>&1 | head -n1)
-        echo -e "${GREEN}[√] FFmpeg 已安装${NC}"
+        echo -e "${GREEN}[√] FFmpeg 已安装（系统）${NC}"
         echo "  $FFMPEG_VERSION"
+    elif [ -f "node_modules/ffmpeg-static/ffmpeg" ]; then
+        echo -e "${GREEN}[√] FFmpeg 使用 npm 内置静态二进制（ffmpeg-static）${NC}"
     else
-        echo -e "${YELLOW}[!] FFmpeg 未安装，正在尝试自动安装...${NC}"
-        install_ffmpeg
+        echo -e "${YELLOW}[!] 未检测到系统 FFmpeg，将安装 npm 静态二进制作为兜底...${NC}"
+        npm install ffmpeg-static ffprobe-static --save >/dev/null 2>&1 \
+            && echo -e "${GREEN}[√] ffmpeg-static 安装完成${NC}" \
+            || { echo -e "${YELLOW}[!] ffmpeg-static 安装失败，尝试系统包管理器...${NC}"; install_ffmpeg; }
     fi
 }
 

@@ -67,58 +67,50 @@ curl -fsSL https://raw.githubusercontent.com/a125477365/web-audio-streamer/main/
 
 ## 快速开始
 
-### 安装依赖
+### 1. 安装依赖
 
 ```bash
 npm install
 ```
 
-### 安装 FFmpeg
+依赖里已包含 `ffmpeg-static` / `ffprobe-static`，**无需单独安装系统 FFmpeg**。
+若系统已安装 FFmpeg，会自动优先使用系统版本（见 `server/ffmpeg-paths.js`）。
 
-**macOS:**
-```bash
-brew install ffmpeg
-```
+### 2. 配置 ESP32 地址
 
-**Ubuntu/Debian:**
-```bash
-sudo apt install ffmpeg
-```
-
-**Windows:**
-从 https://ffmpeg.org 下载并添加到 PATH。
-
-### 配置
-
-编辑 `config/config.json`：
+编辑 `config/config.json`（`server.port` 默认 3010）：
 
 ```json
 {
-  "server": {
-    "port": 3000
-  },
-  "esp32": {
-    "host": "192.168.6.89",
-    "port": 8000
-  },
-  "audio": {
-    "sampleRate": 192000,
-    "bitsPerSample": 32,
-    "channels": 2
-  },
-  "music": {
-    "localPaths": ["/path/to/music"]
-  }
+  "server": { "port": 3010 },
+  "esp32":  { "host": "192.168.x.x", "port": 8000 },
+  "music":  { "path": "./music" }
 }
 ```
 
-### 启动服务
+`esp32.host` 填 ESP32 的局域网 IP（见下方"ESP32 配置"获取 IP 的方法），
+也可以启动后在网页「设置」页填写并保存。
+
+> 音频格式无需手动设置：后端会自动探测每首歌的采样率/位深，
+> 并协调为 ESP32 可稳定播放的格式（>48kHz 降为 44.1/48kHz，24/32bit 统一为 32bit），
+> 再通过控制包通知 ESP32 切换，等待 ACK 确认后才推流。
+
+### 3. 启动服务
 
 ```bash
-npm run dev
+npm run dev          # 或 npm start
 ```
 
-打开浏览器访问：http://localhost:3000
+打开浏览器访问：http://localhost:3010
+
+### 无真机自测（可选）
+
+没有连接 ESP32 时，可用内置模拟接收端验证后端协议与推流：
+
+```bash
+node test/mock-esp32.js 8000     # 终端1：模拟 ESP32（会回 ACK 并打印码率）
+# 把 config.json 的 esp32.host 改成 127.0.0.1，再 npm start（终端2）
+```
 
 ## API 接口
 
@@ -156,11 +148,26 @@ npm run dev
 
 确保 ESP32 已烧录音频接收固件（esp32-audio-bridge 项目）。
 
-ESP32 配置：
-- IP: 通过 Web 配置连接 WiFi
+**连接 WiFi 并获取 IP，二选一：**
+
+1. **USB 串口配网（推荐，已连电脑时最快）**
+   ```bash
+   cd ../esp32-audio-bridge
+   python3 tools/provision.py --port /dev/cu.usbmodemXXXX --ssid "你的WiFi" --password "密码"
+   ```
+   命令会让设备保存 WiFi 并重启，连上后自动打印设备 IP；
+   也可只查状态：`python3 tools/provision.py --status`。
+
+2. **配置热点（AP）配网**
+   设备首次启动会开热点 `ESP32_Audio_Setup`，连接后浏览器打开
+   `http://192.168.4.1` 填写 WiFi 即可。
+
+拿到 IP 后填入后端 `config.json` 的 `esp32.host`（或网页设置页）。
+
+ESP32 运行参数：
 - UDP 端口: 8000（默认）
-- 采样率: 192000 Hz
-- 位深: 32 bit
+- 采样率/位深: 由后端按歌曲自动协调并通知，无需手动设置
+- 长按 BOOT 键 5 秒清除配置
 
 ## 许可证
 

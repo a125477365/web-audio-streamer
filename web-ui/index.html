@@ -378,9 +378,9 @@
         <div class="modal-header"><div class="modal-title">📁 选择目录</div><button class="modal-close" @click="showDirPicker = false">✕</button></div>
         <div class="modal-body" style="max-height:400px;">
           <div v-if="dirLoading" style="text-align:center;padding:20px;color:#888;">⏳ 加载中...</div>
-          <div v-for="d in dirs" :key="d.path" class="dir-item" :class="{ selected: musicDir === d.path }" @click="pickDir(d)"><span>📂</span><span style="flex:1;">{{ d.name }}</span></div>
+          <div v-for="d in dirs" :key="d.path" class="dir-item" :class="{ selected: pendingDir === d.path }" @click="pickDir(d)"><span>📂</span><span style="flex:1;">{{ d.name }}</span></div>
         </div>
-        <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px;"><button class="btn btn-secondary" @click="showDirPicker = false">取消</button><button class="btn btn-primary" @click="confirmDir" :disabled="!musicDir || musicDir === savedDir">确认</button></div>
+        <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px;"><button class="btn btn-secondary" @click="showDirPicker = false">取消</button><button class="btn btn-primary" @click="confirmDir" :disabled="!pendingDir">确认</button></div>
       </div>
  </div>
 
@@ -522,7 +522,7 @@ var fetchMessage = ref('');
         });
 
         // === API ===
- function apiGet(p) { return fetch('/api' + p, {cache: 'no-store'}).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }); }
+ function apiGet(p) { return fetch('/api' + p, {cache: 'no-store'}).then(function(r) { return r.json().catch(function() { throw new Error('HTTP ' + r.status); }); }); }
  function apiPost(p, b) { return fetch('/api' + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }).then(function(r) { return r.json(); }); }
 
  // === ESP32 配置 ===
@@ -667,11 +667,13 @@ function doFetchSources() {
  } else {
  fetchError.value = data.error || '获取失败';
  showFetchError.value = true;
+ showToast('❌ 音源获取失败', fetchError.value, 'error');
  }
  } catch(ex) {
  console.warn('[SSE done] parse error:', ex);
  fetchError.value = '解析响应失败';
  showFetchError.value = true;
+ showToast('❌ 音源获取失败', '解析响应失败', 'error');
  }
  });
 
@@ -683,6 +685,7 @@ function doFetchSources() {
     if (!fetchProgress.value) {
       fetchError.value = 'SSE 连接失败，请重试';
       showFetchError.value = true;
+      showToast('❌ 音源获取失败', 'SSE 连接失败，请重试', 'error');
     }
   };
 }
@@ -759,7 +762,10 @@ function doFetchSources() {
           apiGet('/local/scan?path=' + encodeURIComponent(musicDir.value) + '&sortBy=' + sortBy.value).then(function(res) { if (res.success) songs.value = res.files; }).finally(function() { scanning.value = false; });
         }
         function playOne(s) {
-          apiGet('/local/play?file=' + encodeURIComponent(s.path)).then(function(res) { if (res.success) { track.value = { title: s.title, artist: s.artist, path: s.path }; playingPath.value = s.path; } });
+          apiGet('/local/play?file=' + encodeURIComponent(s.path)).then(function(res) {
+            if (res.success) { track.value = { title: s.title, artist: s.artist, path: s.path }; playingPath.value = s.path; }
+            else { showToast('❌ 播放失败', res.error || '', 'error'); }
+          }).catch(function(err) { showToast('❌ 播放失败', String(err.message || err), 'error'); });
         }
         function toggleSel(path) { var idx = selLocal.value.indexOf(path); if (idx >= 0) selLocal.value.splice(idx, 1); else selLocal.value.push(path); }
         function playSelectedSongs() {
@@ -872,19 +878,51 @@ function doSearch() {
         }
 
         // === FM ===
-        function startFM() { fmLoading.value = true; apiPost('/recommend/start').then(function(res) { if (res.success) fmPlaying.value = true; }).finally(function() { fmLoading.value = false; }); }
-        function stopFM() { apiPost('/recommend/stop').then(function() { fmPlaying.value = false; }); }
+        function startFM() {
+          fmLoading.value = true;
+          apiPost('/recommend/start').then(function(res) {
+            if (res.success && Array.isArray(res.playlist) && res.playlist.length > 0) {
+              var list = res.playlist.filter(function(s) { return s.id; }).map(function(s) {
+                return { title: s.title, artist: s.artist, id: String(s.id), source: s.source || 'wy', duration: 0 };
+              });
+              if (list.length === 0) { showToast('FM 启动失败', '推荐结果中没有可播放的歌曲', 'error'); return; }
+              playlist.value = list; playlistIdx.value = 0; fmPlaying.value = true;
+              playPlaylistAt(0);
+              showToast('📻 私人FM', '已生成 ' + list.length + ' 首推荐歌曲', 'success');
+            } else {
+              showToast('FM 启动失败', res.error || '没有推荐结果', 'error');
+            }
+          }).catch(function(err) {
+            showToast('FM 启动失败', String(err.message || err), 'error');
+          }).finally(function() { fmLoading.value = false; });
+        }
+        function stopFM() { apiPost('/recommend/stop'); apiPost('/control/stop'); fmPlaying.value = false; }
 
         // === Radio ===
-        function playRadio(r) { apiGet('/radio/play?url=' + encodeURIComponent(r.url)).then(function(res) { if (res.success) { track.value = { title: r.name, artist: r.genre || '电台', isLive: true }; isLive.value = true; } }); }
-        function playCustomRadio() { if (!customRadioUrl.value) return; apiGet('/radio/play?url=' + encodeURIComponent(customRadioUrl.value)).then(function(res) { if (res.success) { track.value = { title: '自定义电台', artist: customRadioUrl.value, isLive: true }; isLive.value = true; } }); }
+        function playRadio(r) { apiGet('/radio/play?url=' + encodeURIComponent(r.url)).then(function(res) { if (res.success) { track.value = { title: r.name, artist: r.genre || '电台', isLive: true }; isLive.value = true; } else { showToast('❌ 电台播放失败', res.error || '', 'error'); } }).catch(function(err) { showToast('❌ 电台播放失败', String(err.message || err), 'error'); }); }
+        function playCustomRadio() { if (!customRadioUrl.value) return; apiGet('/radio/play?url=' + encodeURIComponent(customRadioUrl.value)).then(function(res) { if (res.success) { track.value = { title: '自定义电台', artist: customRadioUrl.value, isLive: true }; isLive.value = true; } else { showToast('❌ 电台播放失败', res.error || '', 'error'); } }).catch(function(err) { showToast('❌ 电台播放失败', String(err.message || err), 'error'); }); }
 
         // === Controls ===
-        function togglePlay() { if (status.value.isPlaying) apiPost('/control/pause'); else apiPost('/control/resume'); }
+        function togglePlay() {
+          if (status.value.isPlaying) { apiPost('/control/pause'); return; }
+          if (status.value.state === 'paused') { apiPost('/control/resume'); return; }
+          // 空闲状态：如有播放列表则从当前位置开始播放
+          if (playlist.value.length > 0) playPlaylistAt(playlistIdx.value >= 0 ? playlistIdx.value : 0);
+        }
         function setVolume() { apiPost('/control/volume', { volume: volume.value }); }
         function seek(e) { if (!status.value.duration) return; var rect = e.currentTarget.getBoundingClientRect(); var pct = (e.clientX - rect.left) / rect.width; apiPost('/control/seek', { time: pct * status.value.duration }); }
-        function prev() {}
-        function next() {}
+        function prev() {
+          if (playlist.value.length === 0) { showToast('没有播放列表', '请先选择歌曲加入播放列表', 'info'); return; }
+          var i = playlistIdx.value <= 0 ? playlist.value.length - 1 : playlistIdx.value - 1;
+          playPlaylistAt(i);
+        }
+        function next() {
+          if (playlist.value.length === 0) { showToast('没有播放列表', '请先选择歌曲加入播放列表', 'info'); return; }
+          var i = playMode.value === 'random'
+            ? Math.floor(Math.random() * playlist.value.length)
+            : (playlistIdx.value + 1) % playlist.value.length;
+          playPlaylistAt(i);
+        }
         function togglePlayMode() { var modes = ['single', 'sequence', 'random']; var idx = modes.indexOf(playMode.value); playMode.value = modes[(idx + 1) % modes.length]; localStorage.setItem('playMode', playMode.value); }
         function autoNext() {
           if (playlist.value.length === 0) return;
@@ -954,7 +992,7 @@ function doSearch() {
           playlist, playlistIdx, playMode, showPlaylist, playModeIcon, playModeName, playModeTitle,
           favorites, isFav,
           fmPlaying, fmLoading,
-          showDirPicker, dirs, dirLoading,
+          showDirPicker, dirs, dirLoading, pendingDir,
           radios, customRadioUrl,
  loadCurrentSource, doFetchSources, openSwitchModal, switchTo, selectPlugin, togglePlugin, autoFetchIfNeeded,
           doScan, playOne, toggleSel, playSelectedSongs, addAllToPlaylist,

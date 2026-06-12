@@ -29,19 +29,30 @@ export class RecommendationEngine {
     // 1. 获取本地音乐列表
     const musicPath = this.config.music?.path || './music';
     this.localMusicCache = this._scanLocalMusic(musicPath);
-    
-    if (this.localMusicCache.length === 0) {
-      // 如果本地没有音乐，随机推荐热门歌曲
-      return await this._randomRecommend(options);
+
+    // 2. 生成推荐（本地没有音乐时随机推荐热门歌手）
+    const recommendations = this.localMusicCache.length === 0
+      ? await this._randomRecommend(options)
+      : await this._generateRecommendations(options);
+
+    // 3. 解析为可播放歌曲（补全歌曲 id，前端通过 /api/online/play 播放）
+    const resolved = [];
+    for (const rec of recommendations) {
+      if (rec.id) {
+        resolved.push({ source: 'wy', ...rec });
+        continue;
+      }
+      try {
+        const found = await this._searchOnline(`${rec.artist} ${rec.title}`);
+        if (found.length > 0) resolved.push({ ...found[0], source: 'wy' });
+      } catch (e) {
+        console.warn('[Recommend] 解析歌曲失败:', rec.artist, rec.title, e.message);
+      }
     }
-    
-    // 2. 分析本地音乐并生成推荐
-    const recommendations = await this._generateRecommendations(options);
-    
-    // 3. 搜索并播放
-    this.currentPlaylist = recommendations;
+
+    this.currentPlaylist = resolved;
     this.currentIndex = 0;
-    
+
     return {
       success: true,
       playlist: this.currentPlaylist,
@@ -63,6 +74,7 @@ export class RecommendationEngine {
   getStatus() {
     return {
       isPlaying: this.isPlaying,
+      running: this.isPlaying,
       currentIndex: this.currentIndex,
       playlistLength: this.currentPlaylist.length,
       localMusicCount: this.localMusicCache.length

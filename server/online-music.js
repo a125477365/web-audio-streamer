@@ -249,6 +249,8 @@ export class OnlineMusicApi {
         limit: parsedLimit,
         verifyLimit: Number.parseInt(options.verifyLimit, 10) || Math.max(parsedLimit * 2, 24),
         concurrency: Number.parseInt(options.verifyConcurrency, 10) || 8,
+        timeBudgetMs: Number.parseInt(options.verifyTimeBudgetMs, 10) || 12000,
+        fallbackCandidates: candidates,
       });
     } catch (error) {
       console.error("[OnlineMusicApi] 搜索失败:", error.message);
@@ -321,34 +323,18 @@ export class OnlineMusicApi {
   }
 
   _sortPlayableResults(results = []) {
-    return [...results].sort((a, b) => {
-      const aLossless = this._bestQualityRank(a) >= 4 ? 1 : 0;
-      const bLossless = this._bestQualityRank(b) >= 4 ? 1 : 0;
-      if (aLossless !== bLossless) return bLossless - aLossless;
-
-      const aFull = a.playable === true && a.isTrial !== true ? 1 : 0;
-      const bFull = b.playable === true && b.isTrial !== true ? 1 : 0;
-      if (aFull !== bFull) return bFull - aFull;
-
-      const aSize = this._verifiedSize(a);
-      const bSize = this._verifiedSize(b);
-      const aHasSize = aSize > 0 ? 1 : 0;
-      const bHasSize = bSize > 0 ? 1 : 0;
-      if (aHasSize !== bHasSize) return bHasSize - aHasSize;
-      if (aSize !== bSize) return bSize - aSize;
-
-      const aQuality = this._bestQualityRank(a);
-      const bQuality = this._bestQualityRank(b);
-      if (aQuality !== bQuality) return bQuality - aQuality;
-
-      return (a._rankIndex || 0) - (b._rankIndex || 0);
-    });
+    // 保留 search() 已计算好的相关性排序（_rankIndex）。
+    // 验证阶段只负责过滤掉试听版，不按音质重排——否则高音质翻唱会盖过原唱。
+    // search() 的排序已综合了：关键词匹配 > 原唱优先 > 完整版 > 无损 > 文件大小。
+    return [...results].sort((a, b) => (a._rankIndex || 0) - (b._rankIndex || 0));
   }
 
   async _filterPlayableFullResults(results, options = {}) {
     const limit = options.limit || 30;
     const verifyLimit = options.verifyLimit || Math.max(limit * 3, 60);
     const concurrency = Math.max(1, options.concurrency || 6);
+    const timeBudgetMs = options.timeBudgetMs || 12000;
+    const deadline = Date.now() + timeBudgetMs;
     const candidates = results
       .map((song, index) => ({ ...song, _rankIndex: index }))
       .filter((song) => song && song.id && song.title && song.artist && song.source)
@@ -360,11 +346,12 @@ export class OnlineMusicApi {
       let cursor = 0;
       const worker = async () => {
         while (cursor < batch.length) {
+          if (Date.now() > deadline) return; // 超出时间预算，停止验证
           const song = batch[cursor++];
           try {
             const quality = this._desiredVerifyQuality(song);
-            const result = await this.getSongUrl(song.id, song, quality, { allowTrial: false });
-            if (!result?.url || result.isTrial) continue;
+            const result = await this.getSongUrl(song.id, song, quality, { allowTrial: false, skipCrossSource: true });
+            if (!result?.url || result.isTrial) { song._verifiedTrial = true; continue; }
             accepted.push({
               ...song,
               playable: true,
@@ -374,6 +361,8 @@ export class OnlineMusicApi {
               crossSource: result.crossSource || null,
             });
           } catch (err) {
+            // 明确是试听版 → 标记排除；其他失败（网络/解析）保留为未验证，仍展示
+            if (/试听/.test(err.message || "")) song._verifiedTrial = true;
             console.warn(`[OnlineMusicApi] 跳过不可播放/试听结果: ${song.source}/${song.id} ${song.title} - ${err.message}`);
           }
         }
@@ -388,11 +377,34 @@ export class OnlineMusicApi {
       if (topResults.length >= limit && (strongCount >= Math.min(3, limit) || offset + batchSize >= candidates.length)) {
         break;
       }
+      if (Date.now() > deadline) {
+        console.warn(`[OnlineMusicApi] 验证超出时间预算(${timeBudgetMs}ms)，已验证 ${accepted.length} 首，其余返回未验证候选`);
+        break;
+      }
     }
 
-    return this._sortPlayableResults(accepted)
-      .slice(0, limit)
-      .map(({ _rankIndex, ...song }) => song);
+    // 已验证为完整版的歌曲（按 source:id 建索引）
+    const acceptedByKey = new Map(accepted.map((s) => [`${s.source}:${s.id}`, s]));
+
+    // 按原始相关性顺序（candidates 已是 _rankIndex 升序）输出：
+    // - 验证为完整版 → 用验证结果（含 actualSize/resolvedQuality）
+    // - 验证确认为试听版（_verifiedTrial）→ 排除
+    // - 未验证（时间预算内没轮到）→ 标记 unverified，播放时再做试听检测+跨源重试
+    const output = [];
+    for (const song of candidates) {
+      if (output.length >= limit) break;
+      const key = `${song.source}:${song.id}`;
+      const full = acceptedByKey.get(key);
+      if (full) {
+        output.push(full);
+      } else if (song._verifiedTrial) {
+        continue; // 验证确认为试听版，排除
+      } else {
+        output.push({ ...song, playable: null, isTrial: null, unverified: true });
+      }
+    }
+
+    return output.map(({ _rankIndex, _verifiedTrial, ...song }) => song);
   }
 
   // ==========================================================
@@ -451,11 +463,13 @@ export class OnlineMusicApi {
  }
     }
 
-    // 所有音质都是试听版 → 尝试跨源重试
-    const crossSourceResult = await this._crossSourceRetry(id, songInfo);
-    if (crossSourceResult) {
-      this._setCachedUrl(cacheKey, crossSourceResult);
-      return crossSourceResult;
+    // 所有音质都是试听版 → 尝试跨源重试（批量验证时跳过，避免每首歌触发全平台搜索拖慢响应）
+    if (!options.skipCrossSource) {
+      const crossSourceResult = await this._crossSourceRetry(id, songInfo);
+      if (crossSourceResult) {
+        this._setCachedUrl(cacheKey, crossSourceResult);
+        return crossSourceResult;
+      }
     }
 
  // 最终回退：返回缓存中最后一个试听版链接

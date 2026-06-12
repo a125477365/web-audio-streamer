@@ -1250,12 +1250,12 @@ app.get("/api/control/status", (req, res) => {
  res.json({
  success: true,
  status: {
- playing: status.playing || false,
- paused: status.paused || false,
+ playing: status.isPlaying || false,
+ paused: status.state === 'paused',
  volume: status.volume || 100,
  currentTime: status.currentTime || 0,
  duration: status.duration || 0,
- track: status.track || null,
+ track: status.source || null,
  recommend: recommendStatus,
  },
  source: currentSource,
@@ -1266,48 +1266,26 @@ app.get("/api/control/status", (req, res) => {
  * 上一曲 (需要配合播放列表使用)
  * POST /api/control/prev
  */
-app.post("/api/control/prev", async (req, res) => {
- try {
- // 检查是否有推荐播放列表
- const recommendStatus = recommender.getStatus();
- if (recommendStatus.running && recommendStatus.currentIndex > 0) {
- // 如果正在推荐播放，切换到上一首
- await recommender.prev();
- return res.json({ success: true, message: "Previous track" });
- }
- 
- // 否则返回错误（需要客户端实现播放列表逻辑）
- res.json({ 
- success: false, 
+app.post("/api/control/prev", (req, res) => {
+ // 播放列表导航由前端维护（前端持有 playlist 并调用对应的播放接口）
+ res.json({
+ success: false,
  error: "No playlist available",
- hint: "Use recommendation mode for playlist navigation"
+ hint: "Playlist navigation is handled by the web UI"
  });
- } catch (err) {
- res.status(500).json({ success: false, error: err.message });
- }
 });
 
 /**
  * 下一曲
  * POST /api/control/next
  */
-app.post("/api/control/next", async (req, res) => {
- try {
- // 检查是否有推荐播放列表
- const recommendStatus = recommender.getStatus();
- if (recommendStatus.running) {
- await recommender.next();
- return res.json({ success: true, message: "Next track" });
- }
- 
- res.json({ 
- success: false, 
+app.post("/api/control/next", (req, res) => {
+ // 播放列表导航由前端维护（前端持有 playlist 并调用对应的播放接口）
+ res.json({
+ success: false,
  error: "No playlist available",
- hint: "Use recommendation mode for playlist navigation"
+ hint: "Playlist navigation is handled by the web UI"
  });
- } catch (err) {
- res.status(500).json({ success: false, error: err.message });
- }
 });
 
 app.get("/api/status", (req, res) => {
