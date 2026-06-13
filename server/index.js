@@ -418,7 +418,7 @@ app.get("/api/local/play", async (req, res) => {
  */
 app.get("/api/online/search", async (req, res) => {
   try {
-    const { q, source, limit, page } = req.query;
+    const { q, source, limit, page, verify } = req.query;
     if (!q) {
       return res.status(400).json({ success: false, error: "Missing search query" });
     }
@@ -427,6 +427,8 @@ app.get("/api/online/search", async (req, res) => {
     if (source && source !== "all" && source !== "multi") options.source = source;
     if (limit) options.limit = parseInt(limit) || 30;
     if (page) options.page = parseInt(page) || 1;
+    // verify=1：搜索阶段逐首预验证可播放（慢、且会消耗音源配额）；默认关闭，播放时再解析
+    if (verify === "1" || verify === "true") options.verify = true;
 
     const results = await onlineApi.search(q, options);
 
@@ -529,10 +531,10 @@ app.get("/api/online/play", async (req, res) => {
  detail = '音源服务器拒绝连接，该音源可能已关闭，请切换音源';
  } else if (msg.includes('timeout') || msg.includes('ETIMEDOUT')) {
  detail = '连接音源超时，网络可能不稳定，请稍后重试';
- } else if (msg.includes('所有音源均无法')) {
- detail = '已尝试所有可用音源均失败，可能是版权限制或音源均已失效';
+ } else if (msg.includes('所有音源均无法') || msg.includes('试听')) {
+ detail = '当前免费音源暂时无法解析这首歌（多为被限流或临时失效，并非真的版权封锁）。请点重试，或换同名的另一个版本/其它歌曲。';
  } else {
- detail = '无法获取播放链接，可能是版权限制或音源失效';
+ detail = '暂时无法获取播放链接（免费音源可能被限流），请稍后重试或换一个版本。';
  }
  return res.status(502).json({
  success: false,

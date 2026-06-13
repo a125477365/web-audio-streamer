@@ -182,10 +182,23 @@ export class OnlineMusicApi {
    songAppearMap[key] = (songAppearMap[key] || 0) + 1;
  }
 
+ // 平台可靠性（免费音源解析成功率经验值）：网易云接口最开放最易解析；
+ // 酷狗次之；QQ/咪咕需 cookie/地域；酷我高音质多为 VIP 试听，最不易拿到完整版。
+ // 用作排序偏置：让"大概率能播"的平台靠前，减少用户点到打不开的几率。
+ const platformReliability = { wy: 100, local: 120, kg: 60, mg: 40, tx: 40, kw: 0 };
+ const relScore = (s) => platformReliability[s.source] ?? 30;
+
  displayResults.sort((a, b) => {
-   // 第一优先：关键词匹配度
+   // 第一优先：关键词匹配度（分桶，容忍同等相关下的细微差异）
    const aMatch = matchScore(a);
    const bMatch = matchScore(b);
+   // 当两者匹配度接近（同一相关性档位，差距 < 600）时，先按平台可靠性排，
+   // 避免"酷我歌手名干净 +500"把不可播的结果顶到网易云可播结果之前。
+   if (Math.abs(aMatch - bMatch) < 600) {
+     const aRel = relScore(a);
+     const bRel = relScore(b);
+     if (aRel !== bRel) return bRel - aRel;
+   }
    if (aMatch !== bMatch) return bMatch - aMatch;
 
    // 第二优先：原唱优先（跨平台出现次数 + 原始顺序）
@@ -229,29 +242,36 @@ export class OnlineMusicApi {
   const relevant = filtered.filter((song) => this._matchesQuery(song, queryTerms));
   const candidates = relevant.length > 0 ? relevant : filtered;
 
-      if (options.fullOnly === false) {
-        return candidates.slice(0, Number.parseInt(options.limit, 10) || 30);
-      }
-
-      if (!this._hasLatestSourcePlugins()) {
-        return candidates
-          .slice(0, Number.parseInt(options.limit, 10) || 30)
-          .map((song) => ({
-            ...song,
-            playable: false,
-            needsSource: true,
-            isTrial: null,
-          }));
-      }
-
       const parsedLimit = Number.parseInt(options.limit, 10) || 30;
-      return await this._filterPlayableFullResults(candidates, {
-        limit: parsedLimit,
-        verifyLimit: Number.parseInt(options.verifyLimit, 10) || Math.max(parsedLimit * 2, 24),
-        concurrency: Number.parseInt(options.verifyConcurrency, 10) || 8,
-        timeBudgetMs: Number.parseInt(options.verifyTimeBudgetMs, 10) || 12000,
-        fallbackCandidates: candidates,
-      });
+
+      if (options.fullOnly === false) {
+        return candidates.slice(0, parsedLimit);
+      }
+
+      const verifyMode = String(options.verify ?? "").toLowerCase();
+
+      // verify=full/1：严格全量预验证（慢、最准，丢弃不可播）。仅在用户显式要求时用。
+      if ((verifyMode === "full" || verifyMode === "1" || options.verify === true) && this._hasLatestSourcePlugins()) {
+        return await this._filterPlayableFullResults(candidates, {
+          limit: parsedLimit,
+          verifyLimit: Number.parseInt(options.verifyLimit, 10) || Math.max(parsedLimit * 2, 24),
+          concurrency: Number.parseInt(options.verifyConcurrency, 10) || 8,
+          timeBudgetMs: Number.parseInt(options.verifyTimeBudgetMs, 10) || 12000,
+          fallbackCandidates: candidates,
+        });
+      }
+
+      // verify=light：轻量探测重排（对前若干条单次解析+HEAD，不降级/不跨源）。
+      // 注意：免费音源多为单一可用源且限流严重，验证本身会刷爆配额导致随后播放失败，
+      // 故不作为默认。仅在显式 verify=light 时启用。
+      if (verifyMode === "light" && this._hasLatestSourcePlugins()) {
+        return await this._lightReorderByPlayable(candidates, parsedLimit);
+      }
+
+      // 默认：搜索零网络调用、瞬时返回。可播放性由排序里的平台可靠性偏置 + 元数据提示体现，
+      // 真正解析留到点播放时（getSongUrl：音质降级 + 跨源回退 + URL 校验），
+      // 把稀缺的音源配额全部留给单首播放，避免搜索阶段的批量验证把它耗尽。
+      return candidates.slice(0, parsedLimit);
     } catch (error) {
       console.error("[OnlineMusicApi] 搜索失败:", error.message);
       return {
@@ -266,6 +286,62 @@ export class OnlineMusicApi {
     if (terms.length === 0) return true;
     const haystack = `${song.title || ""} ${song.artist || ""} ${song.album || ""}`.toLowerCase();
     return terms.some((term) => haystack.includes(term));
+  }
+
+  /**
+   * 快速可播放探测：单次解析 + HEAD 试听检测，不做音质降级/跨源回退（失败即止）。
+   * 用于搜索阶段轻量重排，必须快——慢的全量回退留给真正点播放时的 getSongUrl。
+   * @returns {Promise<boolean|null>} true=可播放完整版, false=试听/失败, null=异常无法判断
+   */
+  async _quickPlayableProbe(song) {
+    try {
+      const quality = this._desiredVerifyQuality(song);
+      const result = this._normalizeSongUrlResult(await this._getSongUrlSingle(song.id, song, quality));
+      if (!result?.url) return false;
+      const trial = await this._checkTrialUrl(result.url, result.headers);
+      if (trial.actualSize === -1) return null; // HEAD 失败，无法判断
+      return !trial.isTrial;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 轻量重排：对前若干条候选做快速探测，把确认可播放的排到最前（稳定排序，不丢弃任何结果）。
+   * 受总时间预算约束，超时则返回当前已探测结果 + 其余按原序。
+   */
+  async _lightReorderByPlayable(candidates, limit, options = {}) {
+    const probeCount = Math.min(candidates.length, Math.max(limit, 10));
+    const toProbe = candidates.slice(0, probeCount);
+    const rest = candidates.slice(probeCount);
+    const concurrency = options.concurrency || 3;
+    const deadline = Date.now() + (options.timeBudgetMs || 8000);
+
+    let cursor = 0;
+    const flags = new Map();
+    const worker = async () => {
+      while (cursor < toProbe.length && Date.now() < deadline) {
+        const song = toProbe[cursor++];
+        flags.set(song, await this._quickPlayableProbe(song));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, toProbe.length || 1) }, () => worker()));
+
+    for (const song of toProbe) {
+      const f = flags.get(song);
+      if (f === true) { song.playable = true; song.isTrial = false; }
+      else if (f === false) { song.playable = false; song.isTrial = true; }
+      // null / 未探测：保持 undefined，前端按元数据给提示
+    }
+
+    // 稳定排序：确认可播放(0) > 未知(1) > 确认不可播(2)，同级保持原序
+    const rank = (s) => (s.playable === true ? 0 : s.playable === false ? 2 : 1);
+    const ordered = toProbe
+      .map((s, i) => [s, i])
+      .sort((a, b) => (rank(a[0]) - rank(b[0])) || (a[1] - b[1]))
+      .map((x) => x[0]);
+
+    return [...ordered, ...rest].slice(0, limit);
   }
 
   _hasLatestSourcePlugins() {

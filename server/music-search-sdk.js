@@ -65,7 +65,7 @@ function httpGet(url, options = {}) {
         Referer: options.referer || "",
         ...options.headers,
       },
-      timeout: options.timeout || 15000,
+      timeout: options.timeout || 8000,
     }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -99,7 +99,7 @@ function httpPost(url, body, options = {}) {
         Referer: options.referer || "",
         ...options.headers,
       },
-      timeout: options.timeout || 15000,
+      timeout: options.timeout || 8000,
     }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
