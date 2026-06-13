@@ -342,7 +342,8 @@
               <div class="player-controls">
                 <button class="ctrl-btn" @click="togglePlayMode" :title="playModeTitle">{{ playModeIcon }}</button>
                 <button class="ctrl-btn" @click="prev">⏮</button>
-                <button class="ctrl-btn ctrl-btn-play" @click="togglePlay">{{ status.isPlaying ? '⏸' : '▶' }}</button>
+                <button class="ctrl-btn ctrl-btn-play" @click="togglePlay" :title="status.isPlaying ? '暂停' : '播放'">{{ status.isPlaying ? '⏸' : '▶' }}</button>
+                <button class="ctrl-btn" @click="stopPlayback" title="停止">⏹</button>
                 <button class="ctrl-btn" @click="next">⏭</button>
                 <button class="ctrl-btn" @click="showPlaylist = true" title="播放列表">📋</button>
               </div>
@@ -470,6 +471,7 @@ var fetchMessage = ref('');
         var playlist = ref([]);
         var playlistIdx = ref(-1);
         var playMode = ref('sequence');
+        var playFailCount = 0; // 连续解析失败计数（用于自动跳过不可播放曲，非响应式）
         var showPlaylist = ref(false);
 
         // Favorites
@@ -478,6 +480,7 @@ var fetchMessage = ref('');
         // FM
         var fmPlaying = ref(false);
         var fmLoading = ref(false);
+        var stopped = ref(false); // 手动停止标记：阻止 WS 自动续播
 
         // Dir picker
         var showDirPicker = ref(false);
@@ -854,6 +857,7 @@ function doSearch() {
  if (s.strMediaMid) params += '&strMediaMid=' + encodeURIComponent(s.strMediaMid);
  apiGet('/online/play?' + params).then(function(res) {
  if (res.success) {
+ playFailCount = 0; // 成功播放，重置连续失败计数
  track.value = { title: s.title, artist: s.artist, id: s.id, source: s.source };
  if (res.playbackStarted === false) {
  showToast('设备未响应', res.detail || res.message || '已获取播放链接，但 ESP32 未响应。', 'warning');
@@ -864,10 +868,23 @@ function doSearch() {
  }
  } else {
  showToast('❌ ' + (res.error || '播放失败'), res.detail || '', 'error');
+ skipToNextOnFailure();
  }
  }).catch(function(err) {
  showToast('❌ 请求失败', err.message || '网络错误', 'error');
+ skipToNextOnFailure();
  });
+ }
+ // 播放列表/FM 中某首解析失败时，自动跳到下一首（避免卡在 VIP/失效曲；最多跳一整轮）
+ function skipToNextOnFailure() {
+ if (stopped.value || playlist.value.length === 0) return;
+ if (playFailCount >= playlist.value.length) {
+ showToast('列表暂不可播', '当前列表里的歌曲都无法解析，可能音源被限流，请稍后重试', 'warning');
+ playFailCount = 0;
+ return;
+ }
+ playFailCount++;
+ setTimeout(function() { if (!stopped.value) next(); }, 800);
  }
         function toggleSelOnline(id) { var idx = selOnline.value.indexOf(id); if (idx >= 0) selOnline.value.splice(idx, 1); else selOnline.value.push(id); }
         function playSelectedOnline() {
@@ -886,9 +903,10 @@ function doSearch() {
                 return { title: s.title, artist: s.artist, id: String(s.id), source: s.source || 'wy', duration: 0 };
               });
               if (list.length === 0) { showToast('FM 启动失败', '推荐结果中没有可播放的歌曲', 'error'); return; }
+              stopped.value = false;
               playlist.value = list; playlistIdx.value = 0; fmPlaying.value = true;
               playPlaylistAt(0);
-              showToast('📻 私人FM', '已生成 ' + list.length + ' 首推荐歌曲', 'success');
+              showToast('📻 私人FM', '已生成 ' + list.length + ' 首推荐歌曲，将轮流播放', 'success');
             } else {
               showToast('FM 启动失败', res.error || '没有推荐结果', 'error');
             }
@@ -896,7 +914,7 @@ function doSearch() {
             showToast('FM 启动失败', String(err.message || err), 'error');
           }).finally(function() { fmLoading.value = false; });
         }
-        function stopFM() { apiPost('/recommend/stop'); apiPost('/control/stop'); fmPlaying.value = false; }
+        function stopFM() { stopPlayback(); }
 
         // === Radio ===
         function playRadio(r) { apiGet('/radio/play?url=' + encodeURIComponent(r.url)).then(function(res) { if (res.success) { track.value = { title: r.name, artist: r.genre || '电台', isLive: true }; isLive.value = true; } else { showToast('❌ 电台播放失败', res.error || '', 'error'); } }).catch(function(err) { showToast('❌ 电台播放失败', String(err.message || err), 'error'); }); }
@@ -904,10 +922,18 @@ function doSearch() {
 
         // === Controls ===
         function togglePlay() {
-          if (status.value.isPlaying) { apiPost('/control/pause'); return; }
-          if (status.value.state === 'paused') { apiPost('/control/resume'); return; }
-          // 空闲状态：如有播放列表则从当前位置开始播放
-          if (playlist.value.length > 0) playPlaylistAt(playlistIdx.value >= 0 ? playlistIdx.value : 0);
+          if (status.value.isPlaying) { apiPost('/control/pause'); return; }   // 播放中 → 暂停
+          if (status.value.state === 'paused') { stopped.value = false; apiPost('/control/resume'); return; } // 暂停 → 继续
+          // 空闲/已停止：如有播放列表则从当前位置开始播放
+          if (playlist.value.length > 0) { stopped.value = false; playPlaylistAt(playlistIdx.value >= 0 ? playlistIdx.value : 0); }
+        }
+        // 停止：停掉推荐+推流，并标记 stopped 阻止 WS 自动续播（暂停按钮不受影响）
+        function stopPlayback() {
+          stopped.value = true;
+          fmPlaying.value = false;
+          apiPost('/recommend/stop');
+          apiPost('/control/stop');
+          showToast('⏹ 已停止', '列表播放已停止', 'info');
         }
         function setVolume() { apiPost('/control/volume', { volume: volume.value }); }
         function seek(e) { if (!status.value.duration) return; var rect = e.currentTarget.getBoundingClientRect(); var pct = (e.clientX - rect.left) / rect.width; apiPost('/control/seek', { time: pct * status.value.duration }); }
@@ -934,7 +960,7 @@ function doSearch() {
         }
 
         // === Playlist ===
-        function playPlaylistAt(i) { playlistIdx.value = i; var s = playlist.value[i]; track.value = { title: s.title, artist: s.artist }; if (s.path) playOne(s); else if (s.id) playOnline(s); }
+        function playPlaylistAt(i) { stopped.value = false; playlistIdx.value = i; var s = playlist.value[i]; track.value = { title: s.title, artist: s.artist }; if (s.path) playOne(s); else if (s.id) playOnline(s); }
         function removeFromPlaylist(i) { playlist.value.splice(i, 1); if (playlistIdx.value >= playlist.value.length) playlistIdx.value = playlist.value.length - 1; }
 
         // === Favorites ===
@@ -952,7 +978,8 @@ function doSearch() {
           ws.onmessage = function(e) {
             var data = JSON.parse(e.data);
             if (data.type === 'status') {
-              if (wasPlaying && !data.data.isPlaying && data.data.progress === 0 && playlist.value.length > 0) setTimeout(function() { autoNext(); }, 500);
+              // 自动续播：上一曲自然播完(progress归0)且未被手动停止时，播下一首
+              if (!stopped.value && wasPlaying && !data.data.isPlaying && data.data.progress === 0 && playlist.value.length > 0) setTimeout(function() { autoNext(); }, 500);
               wasPlaying = data.data.isPlaying;
               status.value = data.data;
               if (data.data.track) track.value = data.data.track;
@@ -999,7 +1026,7 @@ function doSearch() {
           loadDirs, pickDir, confirmDir,
 doSearch, playOnline, toggleSelOnline, playSelectedOnline,
 fmtDur, bestType, isTrialRisk, isFreeFull,
-          startFM, stopFM,
+          startFM, stopFM, stopPlayback, stopped,
           playRadio, playCustomRadio,
  togglePlay, setVolume, seek, prev, next, togglePlayMode,
  playPlaylistAt, removeFromPlaylist,

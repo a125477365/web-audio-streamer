@@ -180,12 +180,12 @@ export class RecommendationEngine {
 
     const prompt = `你是一个音乐推荐专家。用户本地有以下艺术家的歌曲：${artists.join('、')}。
 
-请推荐10首与这些艺术家风格相似的高质量无损音乐（可以是相同艺术家或其他相似艺术家的歌曲）。
+请推荐30首与这些艺术家风格相似的高质量无损音乐（可以是相同艺术家或其他相似艺术家的歌曲）。
 
 返回格式要求：每行一首，格式为"歌手 - 歌名"，不要其他内容。`;
 
     const response = await this._callLLM(baseUrl, apiKey, model, prompt);
-    
+
     // 解析推荐列表
     const recommendations = response.split('\n')
       .filter(line => line.includes('-'))
@@ -196,8 +196,8 @@ export class RecommendationEngine {
           title: parts.slice(1).join('-')
         };
       })
-      .slice(0, 10);
-    
+      .slice(0, 30);
+
     return recommendations;
   }
 
@@ -266,25 +266,37 @@ export class RecommendationEngine {
    * 降级推荐方案
    */
   async _fallbackRecommendations(artists) {
+    const TARGET = 30;
     const recommendations = [];
-    
-    for (const artist of artists.slice(0, 3)) {
+    const seen = new Set();
+    const pool = (artists && artists.length)
+      ? artists
+      : ['周杰伦', '林俊杰', '邓紫棋', '陈奕迅', '薛之谦', '毛不易', '华晨宇', '李荣浩'];
+
+    for (const artist of pool) {
+      if (recommendations.length >= TARGET) break;
       try {
         const searchResults = await this._searchOnline(artist);
-        recommendations.push(...searchResults.slice(0, 3));
+        for (const s of searchResults) {
+          const key = `${s.title || ''}|${s.artist || ''}`.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          recommendations.push(s);
+          if (recommendations.length >= TARGET) break;
+        }
       } catch (e) {
         console.error('[Recommend] Search failed for:', artist);
       }
     }
-    
-    return recommendations.slice(0, 10);
+
+    return recommendations.slice(0, TARGET);
   }
 
   /**
    * 在线搜索
    */
   async _searchOnline(query) {
-    const url = `https://music.163.com/api/search/get?s=${encodeURIComponent(query)}&type=1&limit=5`;
+    const url = `https://music.163.com/api/search/get?s=${encodeURIComponent(query)}&type=1&limit=10`;
     
     return new Promise((resolve, reject) => {
       https.get(url, {
@@ -316,9 +328,9 @@ export class RecommendationEngine {
    * 随机推荐（本地无音乐时）
    */
   async _randomRecommend(options) {
-    const randomArtists = ['周杰伦', '林俊杰', '邓紫棋', '陈奕迅', '薛之谦', '毛不易', '华晨宇', '李荣浩'];
-    const selected = randomArtists.sort(() => Math.random() - 0.5).slice(0, 3);
-    
+    const randomArtists = ['周杰伦', '林俊杰', '邓紫棋', '陈奕迅', '薛之谦', '毛不易', '华晨宇', '李荣浩', '王力宏', '五月天', '蔡依林', '张惠妹', '孙燕姿', '周深'];
+    const selected = randomArtists.sort(() => Math.random() - 0.5).slice(0, 8);
+
     return await this._fallbackRecommendations(selected);
   }
 }
