@@ -1,6 +1,10 @@
 # Web Audio Streamer
 
-基于 Web 的音乐播放器，支持将音频流发送到 ESP32 设备。
+基于 Web 的高音质音乐播放器：利用洛雪音乐音源解析高质量音乐流，经 FFmpeg 转码为 PCM，
+通过 UDP 推送到 ESP32 + CS8406，由光纤/同轴 S/PDIF 输出到音箱/功放。
+
+> 配套固件项目：[esp32-audio-bridge](https://github.com/a125477365/esp32-audio-bridge)
+> —— 内含 **CS8406 ↔ ESP32-S3 的 I2S 引脚对接表**（MCK/BCK/LRCK/DIN）。
 
 ## 一键安装
 
@@ -33,21 +37,23 @@ curl -fsSL https://raw.githubusercontent.com/a125477365/web-audio-streamer/main/
 - 自动提取元数据（艺术家、专辑、封面）
 - 播放列表管理
 
-### 2. 在线音乐（网易云音乐）
-- 搜索歌曲、专辑、艺术家
-- 获取歌曲播放链接
-- 播放热门歌单
+### 2. 在线音乐（多平台）
+- 内置 MusicSearchSdk 多平台并行搜索：**网易云 / 酷我 / 酷狗 / QQ / 咪咕**
+- 启动时自动从 GitHub 搜索并加载最新洛雪 LX 音源插件用于解析播放链接
+- **自动排除试听片段**：HEAD 探测文件大小 + 多音质降级 + 跨源重试，优先返回完整无损版
 
 ### 3. 网络电台
 - 支持流媒体 URL（HLS, ICY）
 - 预设热门电台列表
 - 自定义添加电台
 
-### 4. ESP32 音频流发送
-- FFmpeg 实时转码为 PCM
-- UDP 发送到 ESP32
-- 支持采样率：44.1kHz - 192kHz
-- 支持位深：16bit, 24bit, 32bit
+### 4. ESP32 音频流发送（目标硬件 CS8406）
+- FFmpeg 实时转码为 PCM，UDP 推送到 ESP32
+- 自动探测源格式并协调为 CS8406 可稳定播放的格式：
+  - 位深统一为 **32bit 帧（BCK=64Fs）**，匹配 CS8406；24bit 音频落在高位，无损
+  - 采样率限制在 **44.1k / 48k**（保证 ESP32 单线程 UDP 在 WiFi 上不欠载）
+- 闭环流控：先发 `setAudioConfig` 控制包，**等 ESP32 回 ACK** 后才推流
+- UDP 数据报按 ≤1400 字节、采样帧对齐拆分，避免 IP 分片与丢包错位
 
 ## 系统架构
 

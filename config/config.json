@@ -4,7 +4,7 @@
     "host": "0.0.0.0"
   },
   "esp32": {
-    "host": "172.20.10.2",
+    "host": "192.168.6.93",
     "port": 8000
   },
   "audio": {
@@ -14,7 +14,7 @@
     "bufferMs": 10
   },
   "music": {
-    "path": "/opt/data/workspace/web-audio-streamer/music",
+    "path": "/Users/tanjian/Desktop/code/web-audio-streamer/music",
     "supportedFormats": [
       ".mp3",
       ".flac",

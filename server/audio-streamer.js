@@ -158,8 +158,10 @@ class FFmpegDecoder extends EventEmitter {
 		const codecMap = { 16: 'pcm_s16le', 24: 'pcm_s24le', 32: 'pcm_s32le' };
 		const codec = codecMap[bitsPerSample] || 'pcm_s16le';
 
-		// 不用 -re：解码全速进行，由 AudioSender 按 ESP32 反馈的缓冲水位
-		// 闭环控速（丢包自动补偿），stdout 背压限制内存占用
+		// 不用 -re：解码全速进行，由 AudioSender 的闭环 P 控制器按 ESP32 实时上报的
+		// 缓冲水位(bufLevel)控速（丢包时可短时 >1x 追赶、水位高时 <1x 减速防溢出），
+		// 解码器 stdout 背压（flowIsFull/resumeFlow）把 Node 端内存限制在 ~5s。
+		// 注意：加 -re 会把产出钳死在 1x，反而破坏控制器的追赶/预填充能力。
 		const ffmpegArgs = [];
 
 		// 注入 -headers（用于 CDN 防盗链，如 Referer/User-Agent）
@@ -684,18 +686,26 @@ export class AudioStreamer {
 	}
 
 	/**
-	 * 频率/位深协调：把任意源格式映射为 ESP32 可稳定播放的格式
-	 * - 位深：≤16bit → 16bit；24/32bit → 32bit 容器（24bit 无损升位，ESP32 I2S 对 16/32bit 支持最稳）
-	 * - 采样率：>48kHz 按整数比降频（88.2/176.4k→44.1k，96/192k→48k），
-	 *   控制 WiFi UDP 带宽并保证 ESP32 实时处理
-	 * - 声道：>2 声道混缩为立体声
+	 * 频率/位深协调：把任意源格式映射为 CS8406 (经 ESP32 I2S) 可稳定播放的格式
+	 *
+	 * 目标硬件 = CS8406 S/PDIF 发射板（光纤/同轴输出）：
+	 * - 位深：统一输出 32bit I2S 帧 → BCK=64Fs，正是 CS8406 规格要求的帧格式；
+	 *   16/24bit 源由 ffmpeg 升位到 32bit 容器，音频数据落在高位（CS8406 取高 24bit，无损）。
+	 * - 采样率：CS8406 支持 44.1k–192k，但 ESP32 单线程 UDP 在高码率下易欠载，
+	 *   故限制在 44.1k/48k：<44.1k 上采到 44.1k，>48k 按整数比降到 44.1k 或 48k。
+	 * - 声道：>2 声道混缩为立体声。
+	 *
+	 * 注意：CS8406 必须有 MCLK(256Fs)，由固件 I2S_MCLK_PIN 提供，与此处采样率配套。
 	 */
 	_normalizeFormat(probe) {
 		const out = { ...probe };
-		out.bitsPerSample = (probe.bitsPerSample || DEFAULT_BITS_PER_SAMPLE) <= 16 ? 16 : 32;
+		// 始终 32bit 帧，匹配 CS8406 的 64Fs BCK 要求
+		out.bitsPerSample = 32;
 		let rate = probe.sampleRate || DEFAULT_SAMPLE_RATE;
 		if (rate > 48000) {
-			rate = (rate % 44100 === 0) ? 44100 : 48000;
+			rate = (rate % 44100 === 0) ? 44100 : 48000; // 88.2/176.4k→44.1k，96/192k→48k
+		} else if (rate < 44100) {
+			rate = 44100; // CS8406 下限 44.1k，低于则上采样
 		}
 		out.sampleRate = rate;
 		out.channels = Math.min(probe.channels || DEFAULT_CHANNELS, 2) || DEFAULT_CHANNELS;
