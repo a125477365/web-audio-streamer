@@ -632,18 +632,16 @@ export class HermesSourceApi {
  `洛雪音乐助手(LX Music)使用 JS 插件来获取各平台的音乐播放链接。这些插件以 .js 文件形式存放在 GitHub 仓库中。`,
  `仓库通常包含多个 .js 文件，每个文件对应一个音源（如网易云、酷我、酷狗、QQ、咪咕等）。`,
  "",
- `## 搜索方式（必须遵守）`,
- `你必须使用 Chromium 无头浏览器搜索互联网。具体步骤：`,
- `1. 检查系统是否已安装 chromium 或 google-chrome：执行 which chromium || which chromium-browser || which google-chrome`,
- `2. 如果未安装，则自行安装：`,
- ` - Debian/Ubuntu: apt-get update && apt-get install -y chromium-browser 或 chromium`,
- ` - Alpine: apk add chromium`,
- ` - CentOS/RHEL: yum install -y chromium`,
- `3. 安装完成后，使用无头模式搜索：`,
- ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=lx-music-source&type=repositories&s=stars&o=desc"`,
- ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://github.com/search?q=lxmusic+音源&type=repositories&s=updated&o=desc"`,
- ` chromium --headless --no-sandbox --disable-gpu --dump-dom "https://www.google.com/search?q=洛雪音乐+音源+github+2024+2025"`,
- `4. 也可以结合 curl 辅助验证仓库可达性，但主要发现必须通过浏览器搜索完成`,
+ `## 搜索方式（跨平台，优先用 curl，不要依赖浏览器或包管理器）`,
+ `首选方案（在 macOS / Linux / Windows 都可用）：直接用 curl 调 GitHub 官方搜索 API（返回 JSON，最稳）：`,
+ ` curl -s -H "User-Agent: web-audio-streamer" "https://api.github.com/search/repositories?q=lx-music-source&sort=stars&order=desc&per_page=10"`,
+ ` curl -s -H "User-Agent: web-audio-streamer" "https://api.github.com/search/repositories?q=lxmusic+%E9%9F%B3%E6%BA%90&sort=updated&order=desc&per_page=10"`,
+ `从返回 JSON 的 items[].full_name / default_branch 即可得到 owner / repo / branch。`,
+ `再用 curl 访问 https://api.github.com/repos/{owner}/{repo}/contents 确认仓库里有 .js 文件。`,
+ "",
+ `备选方案（仅当 curl 拿不到结果且系统已装浏览器时再用，切勿尝试 apt-get/apk/yum 安装任何软件）：`,
+ `先 which chromium || which "Google Chrome" || which google-chrome 检查；存在才用其 --headless --dump-dom 抓 GitHub 搜索页。`,
+ `若浏览器不存在就跳过，仅用 curl 的 GitHub API 结果，不要安装。`,
  "",
  `## 仓库格式说明`,
  `你搜索到的必须是 GitHub 仓库地址，格式如下：`,
@@ -664,7 +662,7 @@ export class HermesSourceApi {
  `- 不确定时填 ""，系统会自动扫描子目录`,
  "",
  `## 核心要求`,
- `1. **必须用 Chromium 无头浏览器联网搜索**：不要只用 curl，浏览器能看到更完整的搜索结果。`,
+ `1. **优先用 curl 调 GitHub 搜索 API 联网搜索**（跨平台最稳）；浏览器仅作可选补充，且绝不安装任何软件。`,
  `2. **不要硬编码**：绝对不要使用任何内置、缓存或之前发现的列表。必须实时搜索。`,
  `3. **只返回 GitHub 仓库**：必须是包含洛雪音源 JS 插件的 GitHub 仓库（不是 API 部署地址）。`,
  `4. **排除**：非音源仓库、后端 API 项目(NeteaseCloudMusicApi等)、纯文档仓库、archived 仓库。`,
@@ -674,11 +672,11 @@ export class HermesSourceApi {
  `8. **最后只输出一个 JSON 结果块**：所有搜索日志放 agentLogs，最终仓库列表放 candidates。`,
  "",
  `## 搜索策略建议`,
- `- 用 Chromium 访问 GitHub 搜索 "lx-music-source" 按星数排序`,
- `- 用 Chromium 访问 GitHub 搜索 "lxmusic source" 按最近更新排序`,
- `- 用 Chromium 访问 Google 搜索 "洛雪音乐 音源 github 2025"`,
- `- 用 Chromium 访问 GitHub 搜索 "lx-music-sources" 按星数排序`,
- `- 用 curl 访问仓库 API 验证目录结构和 .js 文件存在`,
+ `- 用 curl 调 GitHub 搜索 API：q=lx-music-source 按星数排序`,
+ `- 用 curl 调 GitHub 搜索 API：q=lxmusic source 按最近更新排序`,
+ `- 用 curl 调 GitHub 搜索 API：q=lx-music-sources 按星数排序`,
+ `- 用 curl 访问仓库 contents API 验证目录结构和 .js 文件存在`,
+ `- （可选）若已装浏览器，再用其抓 Google 搜索 "洛雪音乐 音源 github 2025" 补充`,
  "",
  `## 目标数量`,
  `找到 ${desiredCount} 个候选仓库即可（按星数/更新时间排列）。`,
@@ -1062,7 +1060,8 @@ export class HermesSourceApi {
  const promptFile = path.join(tmpDir, "prompt.txt");
  fs.writeFileSync(promptFile, prompt, "utf8");
 
- // Hermes CLI: hermes chat -q "$(cat promptFile)" --quiet --source tool
+ // Hermes CLI: hermes --cli chat -q "$(cat promptFile)" --quiet --source tool
+ //   (--cli 强制独立模式，绕过 hermes gateway 守护进程，否则会阻塞挂死)
  // OpenClaw CLI: openclaw infer model run --prompt @file --json --local
  const isOpenClaw = agent.executable === "openclaw" || (agent.name && agent.name.toLowerCase().includes("openclaw"));
  const hermesShellArg = `"$(cat '${promptFile.replace(/'/g, "'\\''")}')"` ;
@@ -1079,7 +1078,7 @@ export class HermesSourceApi {
  if (isOpenClaw) {
  args = [...shellArgs.slice(1), "infer", "model", "run", "--prompt", `@${promptFile}`, "--json", "--local"];
  } else {
- args = [...shellArgs.slice(1), "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
+ args = [...shellArgs.slice(1), "--cli", "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
  }
  options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
  } else if (agent.launchCommand === "node") {
@@ -1088,7 +1087,7 @@ export class HermesSourceApi {
  args = [...(agent.launchArgsPrefix || []), "infer", "model", "run", "--prompt", `@${promptFile}`, "--json", "--local"];
  } else {
  // node entry.mjs chat -q "$(cat file)" --quiet --source tool
- args = [...(agent.launchArgsPrefix || []), "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
+ args = [...(agent.launchArgsPrefix || []), "--cli", "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
  }
  options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
  } else {
@@ -1096,7 +1095,7 @@ export class HermesSourceApi {
  if (isOpenClaw) {
  args = [...(agent.launchArgsPrefix || []), "infer", "model", "run", "--prompt", `@${promptFile}`, "--json", "--local"];
  } else {
- args = [...(agent.launchArgsPrefix || []), "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
+ args = [...(agent.launchArgsPrefix || []), "--cli", "chat", "-q", hermesShellArg, "--quiet", "--source", "tool"];
  }
  options = { cwd: process.cwd(), env: process.env, windowsHide: true, shell: true };
  }

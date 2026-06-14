@@ -6,7 +6,6 @@
 import https from 'https';
 import fs from 'fs';
 import path from 'path';
-import { OpenClawConfig } from './openclaw-config.js';
 import { hasHermes, runHermesOneshot } from './hermes-agent.js';
 
 export class RecommendationEngine {
@@ -157,17 +156,9 @@ export class RecommendationEngine {
       }
     }
 
-    // 优先级2：直连 LLM（需在 openclaw 配置/环境变量里有 API key）
-    try {
-      const recs = await this._callAIForRecommendations(artists, options);
-      this.lastSource = 'llm';
-      return recs;
-    } catch (error) {
-      console.error('[Recommend] AI call failed:', error.message);
-      // 优先级3：纯关键词搜索兜底（无 AI）
-      this.lastSource = 'fallback';
-      return await this._fallbackRecommendations(artists);
-    }
+    // 优先级2：纯关键词搜索兜底（无 AI、无 key）——hermes 不可用/失败时使用
+    this.lastSource = 'fallback';
+    return await this._fallbackRecommendations(artists);
   }
 
   /**
@@ -175,12 +166,15 @@ export class RecommendationEngine {
    * 返回 [{ artist, title }]，由 start() 再解析为可播放歌曲
    */
   async _callHermesForRecommendations(artists) {
-    const seed = (artists && artists.length)
-      ? `用户喜欢这些歌手：${artists.join('、')}。`
+    const hasArtists = artists && artists.length;
+    // 语种/风格不写死：有本地歌手就让模型按这些歌手推断，没有才默认华语流行
+    const seed = hasArtists
+      ? `用户喜欢这些歌手：${artists.join('、')}。请先判断他们的语种与曲风。`
       : '用户喜欢华语流行音乐。';
+    const styleHint = hasArtists ? '与上述歌手语种、曲风相近' : '华语流行';
     const prompt =
-      `${seed}请推荐30首风格相似、适合连续聆听的华语歌曲（可包含相同或相似歌手）。` +
-      `严格要求：只输出歌曲列表，每行一首，格式为「歌手 - 歌名」，不要序号、不要解释、不要空行、不要使用任何工具或联网，直接凭你的音乐知识回答。`;
+      `${seed}请推荐30首${styleHint}、适合连续聆听的歌曲（可包含相同或相似歌手，尽量是真实存在、传唱度较高的歌）。` +
+      `严格要求：只输出歌曲列表，每行一首，格式为「歌手 - 歌名」；不要序号、不要解释、不要空行、不要表头、不要使用任何工具或联网，直接凭你的音乐知识回答。`;
 
     // Hermes 启动+推理较慢，给一个有界超时；超时则上层回退到关键词搜索，避免 FM 无限等待。
     // 可用 HERMES_RECOMMEND_TIMEOUT_MS 环境变量调整（默认 300s，hermes 启动+推理较慢）。
@@ -224,104 +218,6 @@ export class RecommendationEngine {
     });
     
     return Array.from(artists).slice(0, 10); // 最多10个艺术家
-  }
-
-  /**
-   * 调用 AI 模型获取推荐
-   */
-  async _callAIForRecommendations(artists, options) {
-    const llmConfig = await this._getLLMConfig();
-
-    if (!llmConfig?.apiKey) {
-      throw new Error('No AI API key found in OpenClaw config or environment');
-    }
-
-    const baseUrl = llmConfig.baseUrl || "https://integrate.api.nvidia.com/v1";
-    const apiKey = llmConfig.apiKey;
-    const model = llmConfig.model || 'nvidia/nemotron-3-super-120b-a12b';
-
-    const prompt = `你是一个音乐推荐专家。用户本地有以下艺术家的歌曲：${artists.join('、')}。
-
-请推荐30首与这些艺术家风格相似的高质量无损音乐（可以是相同艺术家或其他相似艺术家的歌曲）。
-
-返回格式要求：每行一首，格式为"歌手 - 歌名"，不要其他内容。`;
-
-    const response = await this._callLLM(baseUrl, apiKey, model, prompt);
-
-    // 解析推荐列表
-    const recommendations = response.split('\n')
-      .filter(line => line.includes('-'))
-      .map(line => {
-        const parts = line.split('-').map(p => p.trim());
-        return {
-          artist: parts[0],
-          title: parts.slice(1).join('-')
-        };
-      })
-      .slice(0, 30);
-
-    return recommendations;
-  }
-
-  /**
-   * 查找 API Key
-   */
-  async _initOpenClawConfig() {
- if (!this.openclawConfig) {
- this.openclawConfig = await new OpenClawConfig().init();
- }
- }
- 
- _findApiKey() {
- return null; // 由 _callAIForRecommendations 处理
- }
- 
- async _getLLMConfig() {
- await this._initOpenClawConfig();
- return this.openclawConfig.getLLMConfig();
- }
-
- /**
-   * 调用 LLM
-   */
-  async _callLLM(baseUrl, apiKey, model, prompt) {
-    return new Promise((resolve, reject) => {
-      const data = JSON.stringify({
-        model: model,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 500,
-        temperature: 0.8
-      });
-      
-      const options = {
-        hostname: new URL(baseUrl).hostname,
-        port: 443,
-        path: '/v1/chat/completions',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Length': Buffer.byteLength(data)
-        }
-      };
-      
-      const req = https.request(options, (res) => {
-        let body = '';
-        res.on('data', chunk => body += chunk);
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(body);
-            resolve(json.choices?.[0]?.message?.content || '');
-          } catch (e) {
-            reject(e);
-          }
-        });
-      });
-      
-      req.on('error', reject);
-      req.write(data);
-      req.end();
-    });
   }
 
   /**
