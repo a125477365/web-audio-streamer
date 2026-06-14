@@ -7,6 +7,7 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { OpenClawConfig } from './openclaw-config.js';
+import { hasHermes, runHermesOneshot } from './hermes-agent.js';
 
 export class RecommendationEngine {
   constructor(config) {
@@ -36,21 +37,26 @@ export class RecommendationEngine {
       : await this._generateRecommendations(options);
 
     // 3. 解析为可播放歌曲（补全歌曲 id，前端通过 /api/online/play 播放）
-    const resolved = [];
-    for (const rec of recommendations) {
-      if (rec.id) {
-        resolved.push({ source: 'wy', ...rec });
-        continue;
+    //    已带 id 的直接用；hermes 返回的(歌手-歌名)并发搜网易云补 id，保持原推荐顺序。
+    const resolved = new Array(recommendations.length).fill(null);
+    const concurrency = 6;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < recommendations.length) {
+        const idx = cursor++;
+        const rec = recommendations[idx];
+        if (rec.id) { resolved[idx] = { source: 'wy', ...rec }; continue; }
+        try {
+          const found = await this._searchOnline(`${rec.artist} ${rec.title}`);
+          if (found.length > 0) resolved[idx] = { ...found[0], source: 'wy' };
+        } catch (e) {
+          console.warn('[Recommend] 解析歌曲失败:', rec.artist, rec.title, e.message);
+        }
       }
-      try {
-        const found = await this._searchOnline(`${rec.artist} ${rec.title}`);
-        if (found.length > 0) resolved.push({ ...found[0], source: 'wy' });
-      } catch (e) {
-        console.warn('[Recommend] 解析歌曲失败:', rec.artist, rec.title, e.message);
-      }
-    }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
-    this.currentPlaylist = resolved;
+    this.currentPlaylist = resolved.filter(Boolean);
     this.currentIndex = 0;
 
     return {
@@ -134,16 +140,67 @@ export class RecommendationEngine {
   async _generateRecommendations(options) {
     // 提取本地音乐的艺术家
     const artists = this._extractArtists();
-    
-    // 调用 AI 模型生成推荐
+
+    // 优先级1：本地 Hermes Agent（智能推荐，无需在本应用配置 LLM key）
+    if (hasHermes()) {
+      try {
+        const recs = await this._callHermesForRecommendations(artists);
+        if (recs.length > 0) {
+          console.log(`[Recommend] ✅ 本地 Hermes Agent 推荐 ${recs.length} 首`);
+          return recs;
+        }
+        console.warn('[Recommend] Hermes 未解析出有效推荐，回退');
+      } catch (e) {
+        console.warn('[Recommend] Hermes 推荐失败，回退:', e.message);
+      }
+    }
+
+    // 优先级2：直连 LLM（需在 openclaw 配置/环境变量里有 API key）
     try {
-      const aiRecommendations = await this._callAIForRecommendations(artists, options);
-      return aiRecommendations;
+      return await this._callAIForRecommendations(artists, options);
     } catch (error) {
       console.error('[Recommend] AI call failed:', error.message);
-      // 降级：直接搜索艺术家相关歌曲
+      // 优先级3：纯关键词搜索兜底（无 AI）
       return await this._fallbackRecommendations(artists);
     }
+  }
+
+  /**
+   * 调用本地 Hermes Agent 生成推荐列表
+   * 返回 [{ artist, title }]，由 start() 再解析为可播放歌曲
+   */
+  async _callHermesForRecommendations(artists) {
+    const seed = (artists && artists.length)
+      ? `用户喜欢这些歌手：${artists.join('、')}。`
+      : '用户喜欢华语流行音乐。';
+    const prompt =
+      `${seed}请推荐30首风格相似、适合连续聆听的华语歌曲（可包含相同或相似歌手）。` +
+      `严格要求：只输出歌曲列表，每行一首，格式为「歌手 - 歌名」，不要序号、不要解释、不要空行、不要使用任何工具或联网，直接凭你的音乐知识回答。`;
+
+    // Hermes 启动+推理较慢，给一个有界超时；超时则上层回退到关键词搜索，避免 FM 无限等待。
+    // 可用 HERMES_RECOMMEND_TIMEOUT_MS 环境变量调整（默认 60s）。
+    const timeoutMs = parseInt(process.env.HERMES_RECOMMEND_TIMEOUT_MS, 10) || 60000;
+    const text = await runHermesOneshot(prompt, { timeoutMs, lightweight: true });
+
+    const recommendations = [];
+    const seen = new Set();
+    for (const rawLine of String(text).split('\n')) {
+      const line = rawLine.trim().replace(/^\d+[.、)]\s*/, ''); // 去掉可能的序号
+      // 必须形如 "歌手 - 歌名"
+      const m = line.match(/^(.{1,40}?)\s*[-–—]\s*(.{1,60})$/);
+      if (!m) continue;
+      const artist = m[1].trim();
+      const title = m[2].trim();
+      if (!artist || !title) continue;
+      // 过滤明显的非歌曲行（含冒号说明、括号注释开头等）
+      if (/[:：]/.test(artist)) continue;
+      const key = `${title}|${artist}`.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      recommendations.push({ artist, title });
+      if (recommendations.length >= 30) break;
+    }
+    return recommendations;
   }
 
   /**
