@@ -62,6 +62,7 @@ export class RecommendationEngine {
     return {
       success: true,
       playlist: this.currentPlaylist,
+      source: this.lastSource || 'fallback',
       localMusicCount: this.localMusicCache.length
     };
   }
@@ -147,6 +148,7 @@ export class RecommendationEngine {
         const recs = await this._callHermesForRecommendations(artists);
         if (recs.length > 0) {
           console.log(`[Recommend] ✅ 本地 Hermes Agent 推荐 ${recs.length} 首`);
+          this.lastSource = 'hermes';
           return recs;
         }
         console.warn('[Recommend] Hermes 未解析出有效推荐，回退');
@@ -157,10 +159,13 @@ export class RecommendationEngine {
 
     // 优先级2：直连 LLM（需在 openclaw 配置/环境变量里有 API key）
     try {
-      return await this._callAIForRecommendations(artists, options);
+      const recs = await this._callAIForRecommendations(artists, options);
+      this.lastSource = 'llm';
+      return recs;
     } catch (error) {
       console.error('[Recommend] AI call failed:', error.message);
       // 优先级3：纯关键词搜索兜底（无 AI）
+      this.lastSource = 'fallback';
       return await this._fallbackRecommendations(artists);
     }
   }
@@ -178,8 +183,8 @@ export class RecommendationEngine {
       `严格要求：只输出歌曲列表，每行一首，格式为「歌手 - 歌名」，不要序号、不要解释、不要空行、不要使用任何工具或联网，直接凭你的音乐知识回答。`;
 
     // Hermes 启动+推理较慢，给一个有界超时；超时则上层回退到关键词搜索，避免 FM 无限等待。
-    // 可用 HERMES_RECOMMEND_TIMEOUT_MS 环境变量调整（默认 60s）。
-    const timeoutMs = parseInt(process.env.HERMES_RECOMMEND_TIMEOUT_MS, 10) || 60000;
+    // 可用 HERMES_RECOMMEND_TIMEOUT_MS 环境变量调整（默认 300s，hermes 启动+推理较慢）。
+    const timeoutMs = parseInt(process.env.HERMES_RECOMMEND_TIMEOUT_MS, 10) || 300000;
     const text = await runHermesOneshot(prompt, { timeoutMs, lightweight: true });
 
     const recommendations = [];
